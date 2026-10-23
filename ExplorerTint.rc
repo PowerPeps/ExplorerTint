@@ -1,0 +1,33 @@
+#include <winver.h>
+#include <winuser.h>
+#include "version.h"
+
+ISOLATIONAWARE_MANIFEST_RESOURCE_ID RT_MANIFEST "ExplorerTint.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    EXPLORERTINT_VER_MAJOR, EXPLORERTINT_VER_MINOR, EXPLORERTINT_VER_PATCH, EXPLORERTINT_VER_BUILD
+ PRODUCTVERSION EXPLORERTINT_VER_MAJOR, EXPLORERTINT_VER_MINOR, EXPLORERTINT_VER_PATCH, EXPLORERTINT_VER_BUILD
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "ExplorerTint"
+            VALUE "FileDescription",  "ExplorerTint - Windows Explorer visual tweaks"
+            VALUE "FileVersion",      EXPLORERTINT_VER_STRING
+            VALUE "InternalName",     "ExplorerTint"
+            VALUE "OriginalFilename", "ExplorerTint.dll"
+            VALUE "ProductName",      "ExplorerTint"
+            VALUE "ProductVersion",   EXPLORERTINT_VER_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
