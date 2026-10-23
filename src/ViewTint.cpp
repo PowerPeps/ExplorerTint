@@ -5,11 +5,14 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <uxtheme.h>
+#include <vssym32.h>
 
 namespace {
 
 const UINT_PTR kSubclassId = 0x54494E54;
 const COLORREF kDarkBack = RGB(0x20, 0x20, 0x20);
+const COLORREF kDarkText = RGB(0xFF, 0xFF, 0xFF);
+const COLORREF kDarkHeaderText = RGB(0xDE, 0xDE, 0xDE);
 
 struct ViewTint {
     HWND defView = nullptr;
@@ -19,9 +22,17 @@ struct ViewTint {
     Settings settings;
     std::wstring repo;
     std::wstring prefix;  // folder path relative to the repository root, with a trailing backslash
+    bool dark = false;
+    COLORREF headerText = kDarkHeaderText;
+    COLORREF textColor = 0;
+    COLORREF backColor = 0;
     int cachedIndex = -1;
     const StateStyle* cachedStyle = nullptr;
 };
+
+bool IsLight(COLORREF c) {
+    return GetRValue(c) + GetGValue(c) + GetBValue(c) >= 3 * 128;
+}
 
 std::wstring FolderPath(IFolderView* fv) {
     std::wstring path;
@@ -71,28 +82,45 @@ COLORREF ListBack(HWND list) {
     return c == CLR_NONE ? GetSysColor(COLOR_WINDOW) : c;
 }
 
+void FillSolid(HDC hdc, const RECT& rc, COLORREF c) {
+    COLORREF old = SetDCBrushColor(hdc, c);
+    FillRect(hdc, &rc, (HBRUSH)GetStockObject(DC_BRUSH));
+    SetDCBrushColor(hdc, old);
+}
+
 LRESULT OnCustomDraw(ViewTint* t, NMLVCUSTOMDRAW* cd, LRESULT r) {
     if (r & CDRF_SKIPDEFAULT) return r;
-    switch (cd->nmcd.dwDrawStage) {
-    case CDDS_PREPAINT:
+    DWORD stage = cd->nmcd.dwDrawStage;
+    if (stage == CDDS_PREPAINT) {
         t->cachedIndex = -1;
+        t->backColor = ListBack(t->list);
+        t->textColor = ListView_GetTextColor(t->list);
+        if (t->dark && !IsLight(t->textColor)) t->textColor = kDarkText;
         return r | CDRF_NOTIFYITEMDRAW;
-    case CDDS_ITEMPREPAINT:
-    case CDDS_ITEMPREPAINT | CDDS_SUBITEM: {
-        const StateStyle* st = StyleFor(t, (int)cd->nmcd.dwItemSpec);
-        if (!st) return r;
-        COLORREF bg = ListBack(t->list);
-        if (st->back.set && !(cd->nmcd.uItemState & CDIS_SELECTED)) {
-            bg = Blend(st->back, bg);
-            cd->clrTextBk = bg;
+    }
+    if ((stage & ~CDDS_SUBITEM) != CDDS_ITEMPREPAINT) return r;
+
+    bool sub = (stage & CDDS_SUBITEM) != 0;
+    int index = (int)cd->nmcd.dwItemSpec;
+    const StateStyle* st = StyleFor(t, index);
+
+    COLORREF bg = t->backColor;
+    if (st && st->back.set) {
+        bg = Blend(st->back, t->backColor);
+        if (!sub) {
+            RECT rc = cd->nmcd.rc;
+            if (IsRectEmpty(&rc)) ListView_GetItemRect(t->list, index, &rc, LVIR_BOUNDS);
+            FillSolid(cd->nmcd.hdc, rc, bg);
         }
-        bool nameColumn = !(cd->nmcd.dwDrawStage & CDDS_SUBITEM) || cd->iSubItem == 0;
-        if (st->text.set && nameColumn) cd->clrText = Blend(st->text, bg);
-        r |= CDRF_NEWFONT;
-        if (!(cd->nmcd.dwDrawStage & CDDS_SUBITEM)) r |= CDRF_NOTIFYSUBITEMDRAW;
-        return r;
+        if (!(cd->nmcd.uItemState & CDIS_SELECTED)) cd->clrTextBk = bg;
     }
-    }
+
+    bool nameColumn = !sub || cd->iSubItem == 0;
+    if (st && st->text.set && nameColumn) cd->clrText = Blend(st->text, bg);
+    else if (sub || (t->dark && !IsLight(cd->clrText))) cd->clrText = t->textColor;
+
+    r |= CDRF_NEWFONT;
+    if (st && !sub) r |= CDRF_NOTIFYSUBITEMDRAW;
     return r;
 }
 
@@ -103,28 +131,66 @@ bool IsDarkMode() {
     return light == 0;
 }
 
-bool IsLight(COLORREF c) {
-    return GetRValue(c) + GetGValue(c) + GetBValue(c) >= 3 * 128;
+// uxtheme ordinal 133, undocumented, Windows 10 1809+.
+void AllowDarkMode(HWND hwnd) {
+    typedef BOOL (WINAPI* AllowDarkModeForWindow_t)(HWND, BOOL);
+    static auto fn = (AllowDarkModeForWindow_t)GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), MAKEINTRESOURCEA(133));
+    if (fn) fn(hwnd, TRUE);
 }
 
-void ApplyDarkList(HWND list) {
+COLORREF HeaderTextColor(HWND header) {
+    COLORREF c = kDarkHeaderText;
+    if (HTHEME th = OpenThemeData(header, L"Header")) {
+        COLORREF themed;
+        if (SUCCEEDED(GetThemeColor(th, HP_HEADERITEM, 0, TMT_TEXTCOLOR, &themed)) && IsLight(themed)) c = themed;
+        CloseThemeData(th);
+    }
+    return c;
+}
+
+void ApplyDarkList(ViewTint* t) {
+    HWND list = t->list;
     COLORREF back = ListBack(list);
     COLORREF text = ListView_GetTextColor(list);
     Log(L"view: list back=%06X text=%06X", back, text);
-    if (!IsDarkMode()) return;
-    SetWindowTheme(list, L"DarkMode_ItemsView", nullptr);
-    if (HWND header = ListView_GetHeader(list)) SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
+    t->dark = IsDarkMode();
+    if (!t->dark) return;
+
+    AllowDarkMode(list);
+    SetWindowTheme(list, L"ItemsView", nullptr);
+    if (HWND header = ListView_GetHeader(list)) {
+        AllowDarkMode(header);
+        SetWindowTheme(header, L"ItemsView", nullptr);
+        t->headerText = HeaderTextColor(header);
+    }
     if (IsLight(back)) {
         ListView_SetBkColor(list, kDarkBack);
         ListView_SetTextBkColor(list, kDarkBack);
     }
-    if (!IsLight(text)) ListView_SetTextColor(list, RGB(0xFF, 0xFF, 0xFF));
+    if (!IsLight(text)) ListView_SetTextColor(list, kDarkText);
 }
 
 void Destroy(ViewTint* t) {
     if (t->folder) t->folder->Release();
     if (t->folderView) t->folderView->Release();
     delete t;
+}
+
+LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
+    auto t = (ViewTint*)ref;
+    if (msg == WM_NOTIFY && t->dark) {
+        auto hdr = (NMHDR*)lp;
+        if (hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == ListView_GetHeader(hwnd)) {
+            LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+            auto cd = (NMCUSTOMDRAW*)lp;
+            if (cd->dwDrawStage == CDDS_PREPAINT) return r | CDRF_NOTIFYITEMDRAW;
+            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) SetTextColor(cd->hdc, t->headerText);
+            return r;
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, ListSubclassProc, id);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
@@ -177,7 +243,9 @@ void AttachViewTint(IShellView* view) {
     }
     Log(L"view: attached to %s (repo \"%s\")", path.c_str(), t->repo.c_str());
 
-    ApplyDarkList(list);
+    ApplyDarkList(t);
+    SetWindowSubclass(list, ListSubclassProc, kSubclassId, (DWORD_PTR)t);
     SetWindowSubclass(defView, SubclassProc, kSubclassId, (DWORD_PTR)t);
     GitStatus::AddListener(defView);
+    InvalidateRect(list, nullptr, TRUE);
 }
