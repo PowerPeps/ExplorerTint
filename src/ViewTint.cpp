@@ -1,7 +1,9 @@
 #include "ViewTint.h"
 #include "GitStatus.h"
+#include "ImportPatch.h"
 #include "Settings.h"
 #include <commctrl.h>
+#include <psapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <uxtheme.h>
@@ -156,7 +158,7 @@ void DarkenHeader(HWND header) {
 
 void DarkenList(HWND list) {
     AllowDarkMode(list);
-    SetWindowTheme(list, L"DarkMode_Explorer", nullptr);
+    SetWindowTheme(list, L"DarkMode_ItemsView", nullptr);
     if (HWND header = ListView_GetHeader(list)) DarkenHeader(header);
     if (IsLight(ListBack(list))) {
         ListView_SetBkColor(list, kDarkBack);
@@ -192,15 +194,20 @@ LRESULT CALLBACK EarlyDefViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UIN
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-LRESULT CALLBACK EarlyListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+// ref: 0 for the list, 1 for its header.
+LRESULT CALLBACK EarlyCreateProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
     if (msg == WM_CREATE) {
         LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-        DarkenList(hwnd);
-        RemoveWindowSubclass(hwnd, EarlyListProc, id);
+        ref ? DarkenHeader(hwnd) : DarkenList(hwnd);
+        RemoveWindowSubclass(hwnd, EarlyCreateProc, id);
         return r;
     }
-    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, EarlyListProc, id);
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, EarlyCreateProc, id);
     return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+bool IsShellList(HWND hwnd) {
+    return HasClass(hwnd, WC_LISTVIEWW) && HasClass(GetParent(hwnd), L"SHELLDLL_DefView");
 }
 
 thread_local HHOOK t_cbtHook = nullptr;
@@ -208,17 +215,47 @@ thread_local int t_cbtRefs = 0;
 
 // Darkens shell views as they are created, before their first paint.
 LRESULT CALLBACK CbtProc(int code, WPARAM wp, LPARAM lp) {
-    if (code == HCBT_CREATEWND) {
+    if (code == HCBT_CREATEWND && IsDarkMode()) {
         HWND hwnd = (HWND)wp;
         HWND parent = ((CBT_CREATEWNDW*)lp)->lpcs->hwndParent;
-        if (HasClass(hwnd, L"SHELLDLL_DefView")) {
-            if (IsDarkMode()) SetWindowSubclass(hwnd, EarlyDefViewProc, kSubclassId + 1, 0);
-        } else if (HasClass(hwnd, WC_LISTVIEWW) && HasClass(parent, L"SHELLDLL_DefView")) {
-            if (IsDarkMode()) SetWindowSubclass(hwnd, EarlyListProc, kSubclassId + 1, 0);
-        }
+        if (HasClass(hwnd, L"SHELLDLL_DefView"))
+            SetWindowSubclass(hwnd, EarlyDefViewProc, kSubclassId + 1, 0);
+        else if (HasClass(hwnd, WC_LISTVIEWW) && HasClass(parent, L"SHELLDLL_DefView"))
+            SetWindowSubclass(hwnd, EarlyCreateProc, kSubclassId + 1, 0);
+        else if (HasClass(hwnd, WC_HEADERW) && IsShellList(parent))
+            SetWindowSubclass(hwnd, EarlyCreateProc, kSubclassId + 1, 1);
     }
     return CallNextHookEx(nullptr, code, wp, lp);
 }
+
+typedef HTHEME (WINAPI* OpenNcThemeData_t)(HWND, LPCWSTR);
+OpenNcThemeData_t s_openNcThemeData;
+
+// comctl32 opens the list scrollbar theme itself, ignoring the window theme set on the list.
+HTHEME WINAPI HookOpenNcThemeData(HWND hwnd, LPCWSTR classList) {
+    if (classList && wcscmp(classList, L"ScrollBar") == 0 && IsShellList(hwnd) && IsDarkMode())
+        return s_openNcThemeData(nullptr, L"DarkMode_Explorer::ScrollBar");
+    return s_openNcThemeData(hwnd, classList);
+}
+
+BOOL CALLBACK InstallScrollBarHook(PINIT_ONCE, void*, void**) {
+    s_openNcThemeData = (OpenNcThemeData_t)GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), MAKEINTRESOURCEA(49));
+    if (!s_openNcThemeData) return TRUE;
+    HMODULE mods[512];
+    DWORD bytes = 0;
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &bytes)) return TRUE;
+    for (DWORD i = 0; i < bytes / sizeof(HMODULE) && i < ARRAYSIZE(mods); i++) {
+        wchar_t name[MAX_PATH];
+        if (!K32GetModuleBaseNameW(GetCurrentProcess(), mods[i], name, ARRAYSIZE(name)) ||
+            _wcsicmp(name, L"comctl32.dll") != 0)
+            continue;
+        int n = PatchImports(mods[i], "uxtheme.dll", MAKEINTRESOURCEA(49), (void*)HookOpenNcThemeData);
+        Log(L"view: %d OpenNcThemeData slot(s) patched in comctl32 %p", n, mods[i]);
+    }
+    return TRUE;
+}
+
+INIT_ONCE s_scrollBarOnce = INIT_ONCE_STATIC_INIT;
 
 void Destroy(ViewTint* t) {
     if (t->folder) t->folder->Release();
@@ -307,6 +344,7 @@ void AttachViewTint(IShellView* view) {
 
 void HookViewCreation(bool on) {
     if (on) {
+        InitOnceExecuteOnce(&s_scrollBarOnce, InstallScrollBarHook, nullptr, nullptr);
         if (t_cbtRefs++ == 0)
             t_cbtHook = SetWindowsHookExW(WH_CBT, CbtProc, nullptr, GetCurrentThreadId());
     } else if (t_cbtRefs > 0 && --t_cbtRefs == 0 && t_cbtHook) {

@@ -1,6 +1,6 @@
 #include "ClassicList.h"
+#include "ImportPatch.h"
 #include <objbase.h>
-#include <cstring>
 
 static const CLSID CLSID_ItemsView =
     { 0x1eeb5b5a, 0x06fb, 0x4732, { 0x96, 0xb3, 0x97, 0x5c, 0x01, 0x94, 0xeb, 0x39 } };
@@ -49,50 +49,6 @@ static HRESULT WINAPI HookCoGetClassObject(REFCLSID clsid, DWORD ctx, LPVOID inf
     return s_coGetClassObject(clsid, ctx, info, iid, ppv);
 }
 
-static void PatchSlot(ULONG_PTR* slot, void* hook) {
-    DWORD old;
-    if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &old)) return;
-    *slot = (ULONG_PTR)hook;
-    VirtualProtect(slot, sizeof(*slot), old, &old);
-}
-
-static int PatchThunks(BYTE* base, IMAGE_THUNK_DATA* names, IMAGE_THUNK_DATA* slots, const char* name, void* hook) {
-    int count = 0;
-    for (; names->u1.AddressOfData; names++, slots++) {
-        if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
-        auto byName = (IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData);
-        if (strcmp((const char*)byName->Name, name) != 0) continue;
-        PatchSlot(&slots->u1.Function, hook);
-        count++;
-    }
-    return count;
-}
-
-static int PatchImports(HMODULE mod, const char* name, void* hook) {
-    auto base = (BYTE*)mod;
-    auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
-    int count = 0;
-
-    auto& imp = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (imp.VirtualAddress) {
-        for (auto d = (IMAGE_IMPORT_DESCRIPTOR*)(base + imp.VirtualAddress); d->Name; d++) {
-            if (!d->OriginalFirstThunk) continue;
-            count += PatchThunks(base, (IMAGE_THUNK_DATA*)(base + d->OriginalFirstThunk),
-                                 (IMAGE_THUNK_DATA*)(base + d->FirstThunk), name, hook);
-        }
-    }
-
-    auto& dly = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-    if (dly.VirtualAddress) {
-        for (auto d = (IMAGE_DELAYLOAD_DESCRIPTOR*)(base + dly.VirtualAddress); d->DllNameRVA; d++) {
-            if (!d->Attributes.RvaBased) continue;
-            count += PatchThunks(base, (IMAGE_THUNK_DATA*)(base + d->ImportNameTableRVA),
-                                 (IMAGE_THUNK_DATA*)(base + d->ImportAddressTableRVA), name, hook);
-        }
-    }
-    return count;
-}
-
 static BOOL CALLBACK Install(PINIT_ONCE, void*, void**) {
     HMODULE combase = GetModuleHandleW(L"combase.dll");
     if (!combase) combase = LoadLibraryW(L"combase.dll");
@@ -111,9 +67,9 @@ static BOOL CALLBACK Install(PINIT_ONCE, void*, void**) {
             Log(L"classic list: %s not loaded", m);
             continue;
         }
-        int n = PatchImports(h, "CoCreateInstance", (void*)HookCoCreateInstance);
-        n += PatchImports(h, "CoCreateInstanceEx", (void*)HookCoCreateInstanceEx);
-        n += PatchImports(h, "CoGetClassObject", (void*)HookCoGetClassObject);
+        int n = PatchImports(h, nullptr, "CoCreateInstance", (void*)HookCoCreateInstance);
+        n += PatchImports(h, nullptr, "CoCreateInstanceEx", (void*)HookCoCreateInstanceEx);
+        n += PatchImports(h, nullptr, "CoGetClassObject", (void*)HookCoGetClassObject);
         Log(L"classic list: %d import slot(s) patched in %s", n, m);
     }
     return TRUE;
