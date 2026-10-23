@@ -26,8 +26,13 @@ class Bho : public IObjectWithSite, public IDispatch {
     IWebBrowser2* m_web = nullptr;
     IConnectionPoint* m_events = nullptr;
     DWORD m_cookie = 0;
+    bool m_hooked = false;
 
     void Disconnect() {
+        if (m_hooked) {
+            HookViewCreation(false);
+            m_hooked = false;
+        }
         if (m_events) {
             m_events->Unadvise(m_cookie);
             m_events->Release();
@@ -85,6 +90,8 @@ public:
             sp->Release();
         }
         InstallClassicList(LoadSettings().classicList);
+        HookViewCreation(true);
+        m_hooked = true;
 
         IConnectionPointContainer* cpc = nullptr;
         if (m_web && SUCCEEDED(m_web->QueryInterface(IID_PPV_ARGS(&cpc)))) {

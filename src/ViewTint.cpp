@@ -23,6 +23,7 @@ struct ViewTint {
     std::wstring repo;
     std::wstring prefix;  // folder path relative to the repository root, with a trailing backslash
     bool dark = false;
+    HWND header = nullptr;
     COLORREF headerText = kDarkHeaderText;
     COLORREF textColor = 0;
     COLORREF backColor = 0;
@@ -148,26 +149,75 @@ COLORREF HeaderTextColor(HWND header) {
     return c;
 }
 
-void ApplyDarkList(ViewTint* t) {
-    HWND list = t->list;
-    COLORREF back = ListBack(list);
-    COLORREF text = ListView_GetTextColor(list);
-    Log(L"view: list back=%06X text=%06X", back, text);
-    t->dark = IsDarkMode();
-    if (!t->dark) return;
+void DarkenHeader(HWND header) {
+    AllowDarkMode(header);
+    SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
+}
 
+void DarkenList(HWND list) {
     AllowDarkMode(list);
-    SetWindowTheme(list, L"ItemsView", nullptr);
-    if (HWND header = ListView_GetHeader(list)) {
-        AllowDarkMode(header);
-        SetWindowTheme(header, L"ItemsView", nullptr);
-        t->headerText = HeaderTextColor(header);
-    }
-    if (IsLight(back)) {
+    SetWindowTheme(list, L"DarkMode_Explorer", nullptr);
+    if (HWND header = ListView_GetHeader(list)) DarkenHeader(header);
+    if (IsLight(ListBack(list))) {
         ListView_SetBkColor(list, kDarkBack);
         ListView_SetTextBkColor(list, kDarkBack);
     }
-    if (!IsLight(text)) ListView_SetTextColor(list, kDarkText);
+    if (!IsLight(ListView_GetTextColor(list))) ListView_SetTextColor(list, kDarkText);
+}
+
+void ApplyDarkList(ViewTint* t) {
+    Log(L"view: list back=%06X text=%06X", ListBack(t->list), ListView_GetTextColor(t->list));
+    t->dark = IsDarkMode();
+    if (!t->dark) return;
+    DarkenList(t->list);
+    if (HWND header = ListView_GetHeader(t->list)) {
+        t->header = header;
+        t->headerText = HeaderTextColor(header);
+    }
+}
+
+bool HasClass(HWND hwnd, const wchar_t* cls) {
+    wchar_t name[64];
+    return hwnd && GetClassNameW(hwnd, name, ARRAYSIZE(name)) && wcscmp(name, cls) == 0;
+}
+
+LRESULT CALLBACK EarlyDefViewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillSolid((HDC)wp, rc, kDarkBack);
+        return 1;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, EarlyDefViewProc, id);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+LRESULT CALLBACK EarlyListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    if (msg == WM_CREATE) {
+        LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+        DarkenList(hwnd);
+        RemoveWindowSubclass(hwnd, EarlyListProc, id);
+        return r;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, EarlyListProc, id);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+thread_local HHOOK t_cbtHook = nullptr;
+thread_local int t_cbtRefs = 0;
+
+// Darkens shell views as they are created, before their first paint.
+LRESULT CALLBACK CbtProc(int code, WPARAM wp, LPARAM lp) {
+    if (code == HCBT_CREATEWND) {
+        HWND hwnd = (HWND)wp;
+        HWND parent = ((CBT_CREATEWNDW*)lp)->lpcs->hwndParent;
+        if (HasClass(hwnd, L"SHELLDLL_DefView")) {
+            if (IsDarkMode()) SetWindowSubclass(hwnd, EarlyDefViewProc, kSubclassId + 1, 0);
+        } else if (HasClass(hwnd, WC_LISTVIEWW) && HasClass(parent, L"SHELLDLL_DefView")) {
+            if (IsDarkMode()) SetWindowSubclass(hwnd, EarlyListProc, kSubclassId + 1, 0);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
 }
 
 void Destroy(ViewTint* t) {
@@ -181,6 +231,11 @@ LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UIN
     if (msg == WM_NOTIFY && t->dark) {
         auto hdr = (NMHDR*)lp;
         if (hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == ListView_GetHeader(hwnd)) {
+            if (hdr->hwndFrom != t->header) {
+                t->header = hdr->hwndFrom;
+                DarkenHeader(t->header);
+                t->headerText = HeaderTextColor(t->header);
+            }
             LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
             auto cd = (NMCUSTOMDRAW*)lp;
             if (cd->dwDrawStage == CDDS_PREPAINT) return r | CDRF_NOTIFYITEMDRAW;
@@ -248,4 +303,14 @@ void AttachViewTint(IShellView* view) {
     SetWindowSubclass(defView, SubclassProc, kSubclassId, (DWORD_PTR)t);
     GitStatus::AddListener(defView);
     InvalidateRect(list, nullptr, TRUE);
+}
+
+void HookViewCreation(bool on) {
+    if (on) {
+        if (t_cbtRefs++ == 0)
+            t_cbtHook = SetWindowsHookExW(WH_CBT, CbtProc, nullptr, GetCurrentThreadId());
+    } else if (t_cbtRefs > 0 && --t_cbtRefs == 0 && t_cbtHook) {
+        UnhookWindowsHookEx(t_cbtHook);
+        t_cbtHook = nullptr;
+    }
 }
