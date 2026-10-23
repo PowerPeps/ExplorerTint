@@ -14,7 +14,8 @@ call "%VCVARSALL%" amd64 >nul 2>&1
 if errorlevel 1 ( echo [ERREUR] Initialisation de l'environnement MSVC & exit /b 1 )
 cd /d "%~dp0"
 
-del /q ExplorerTint.dll ExplorerTint.exp ExplorerTint.lib 2>nul
+del /q *.old ExplorerTint.exp ExplorerTint.lib 2>nul
+if exist ExplorerTint.dll ren ExplorerTint.dll ExplorerTint.%RANDOM%.old
 if exist obj rmdir /s /q obj
 mkdir obj
 

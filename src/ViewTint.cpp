@@ -103,16 +103,22 @@ bool IsDarkMode() {
     return light == 0;
 }
 
+bool IsLight(COLORREF c) {
+    return GetRValue(c) + GetGValue(c) + GetBValue(c) >= 3 * 128;
+}
+
 void ApplyDarkList(HWND list) {
     COLORREF back = ListBack(list);
-    Log(L"view: list back=%06X text=%06X", back, ListView_GetTextColor(list));
-    if (!IsDarkMode() || GetRValue(back) + GetGValue(back) + GetBValue(back) < 3 * 128) return;
+    COLORREF text = ListView_GetTextColor(list);
+    Log(L"view: list back=%06X text=%06X", back, text);
+    if (!IsDarkMode()) return;
     SetWindowTheme(list, L"DarkMode_ItemsView", nullptr);
     if (HWND header = ListView_GetHeader(list)) SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
-    ListView_SetBkColor(list, kDarkBack);
-    ListView_SetTextBkColor(list, kDarkBack);
-    ListView_SetTextColor(list, RGB(0xFF, 0xFF, 0xFF));
-    Log(L"view: light list forced to dark");
+    if (IsLight(back)) {
+        ListView_SetBkColor(list, kDarkBack);
+        ListView_SetTextBkColor(list, kDarkBack);
+    }
+    if (!IsLight(text)) ListView_SetTextColor(list, RGB(0xFF, 0xFF, 0xFF));
 }
 
 void Destroy(ViewTint* t) {
