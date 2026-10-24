@@ -1,6 +1,6 @@
 // RibbonTest.exe --check [--file blob] [--out patched.bin]
 // RibbonTest.exe --show original|patched [--full] [--png prefix]
-// RibbonTest.exe --probe [--toggle] [--png prefix]
+// RibbonTest.exe --probe [--toggle] [--absent] [--title text] [--expect name]... [--png prefix]
 #include "../src/RibbonPatch.h"
 #include "../src/ImportPatch.h"
 #include <ole2.h>
@@ -12,6 +12,7 @@
 namespace Gdiplus { using std::min; using std::max; }
 #include <gdiplus.h>
 #include <cstdio>
+#include <shlwapi.h>
 #include <map>
 #include <set>
 
@@ -21,6 +22,7 @@ namespace Gdiplus { using std::min; using std::max; }
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shlwapi.lib")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
@@ -307,13 +309,26 @@ bool SavePng(HWND hwnd, const std::wstring& path, bool fromScreen = false) {
     return ok;
 }
 
-IUIAutomationElement* FindByName(IUIAutomation* uia, IUIAutomationElement* root, const wchar_t* name) {
+IUIAutomationElement* FindByName(IUIAutomation* uia, IUIAutomationElement* root, const wchar_t* name, CONTROLTYPEID type = 0) {
     VARIANT v;
     v.vt = VT_BSTR;
     v.bstrVal = SysAllocString(name);
     IUIAutomationCondition* cond = nullptr;
     IUIAutomationElement* found = nullptr;
     if (SUCCEEDED(uia->CreatePropertyCondition(UIA_NamePropertyId, v, &cond))) {
+        if (type) {
+            VARIANT t;
+            t.vt = VT_I4;
+            t.lVal = type;
+            IUIAutomationCondition* byType = nullptr;
+            IUIAutomationCondition* both = nullptr;
+            if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, t, &byType))
+                && SUCCEEDED(uia->CreateAndCondition(cond, byType, &both))) {
+                cond->Release();
+                cond = both;
+            }
+            if (byType) byType->Release();
+        }
         root->FindFirst(TreeScope_Descendants, cond, &found);
         cond->Release();
     }
@@ -507,7 +522,57 @@ bool Toggle(IUIAutomationElement* e) {
 }
 
 // Checks every open Explorer window from outside its process.
-int Probe(const std::wstring& png, bool toggle) {
+struct ProbeOptions {
+    bool toggle = false;
+    bool expectAbsent = false;
+    std::wstring title;
+    std::vector<std::wstring> expect;
+    std::vector<std::wstring> click;
+    bool dump = false;
+    HWND hwnd = nullptr;
+    std::wstring typeInto, typeText;
+};
+
+void Dump(IUIAutomation* uia, IUIAutomationElement* root) {
+    IUIAutomationCondition* all = nullptr;
+    IUIAutomationElementArray* items = nullptr;
+    uia->CreateTrueCondition(&all);
+    if (SUCCEEDED(root->FindAll(TreeScope_Descendants, all, &items)) && items) {
+        int n = 0;
+        items->get_Length(&n);
+        for (int i = 0; i < n; i++) {
+            IUIAutomationElement* e = nullptr;
+            items->GetElement(i, &e);
+            BSTR name = nullptr;
+            CONTROLTYPEID type = 0;
+            e->get_CurrentName(&name);
+            e->get_CurrentControlType(&type);
+            if (name && *name) printf("  [%d] %ls\n", type, name);
+            SysFreeString(name);
+            e->Release();
+        }
+        items->Release();
+    }
+    all->Release();
+}
+
+bool Click(IUIAutomationElement* e) {
+    IUIAutomationInvokePattern* inv = nullptr;
+    if (SUCCEEDED(e->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&inv))) && inv) {
+        HRESULT hr = inv->Invoke();
+        inv->Release();
+        if (SUCCEEDED(hr)) return true;
+    }
+    IUIAutomationLegacyIAccessiblePattern* acc = nullptr;
+    if (SUCCEEDED(e->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId, IID_PPV_ARGS(&acc))) && acc) {
+        HRESULT hr = acc->DoDefaultAction();
+        acc->Release();
+        return SUCCEEDED(hr);
+    }
+    return false;
+}
+
+int Probe(const std::wstring& png, const ProbeOptions& o) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     Gdiplus::GdiplusStartupInput gsi;
     ULONG_PTR gdip = 0;
@@ -519,7 +584,11 @@ int Probe(const std::wstring& png, bool toggle) {
     }
     std::vector<HWND> windows;
     for (HWND hwnd = nullptr; (hwnd = FindWindowExW(nullptr, hwnd, L"CabinetWClass", nullptr)) != nullptr;)
-        windows.push_back(hwnd);
+    {
+        wchar_t text[260] = L"";
+        GetWindowTextW(hwnd, text, ARRAYSIZE(text));
+        if ((o.title.empty() || StrStrIW(text, o.title.c_str())) && (!o.hwnd || o.hwnd == hwnd)) windows.push_back(hwnd);
+    }
     int index = 0;
     for (HWND hwnd : windows) {
         index++;
@@ -532,7 +601,69 @@ int Probe(const std::wstring& png, bool toggle) {
         if (FAILED(uia->ElementFromHandle(hwnd, &root)) || !root) { Report(false, "window element"); continue; }
         wchar_t suffix[16];
         swprintf_s(suffix, L"-%d.png", index);
+        if (!o.typeInto.empty()) {
+            IUIAutomationElement* e = FindByName(uia, root, o.typeInto.c_str());
+            IUIAutomationValuePattern* v = nullptr;
+            bool ok = false;
+            if (e && SUCCEEDED(e->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(&v))) && v) {
+                BSTR text = SysAllocString(o.typeText.c_str());
+                ok = SUCCEEDED(v->SetValue(text));
+                SysFreeString(text);
+                v->Release();
+            }
+            printf("  type into \"%ls\": %s\n", o.typeInto.c_str(), ok ? "done" : "failed");
+            Report(ok, "type text");
+            if (e) e->Release();
+            root->Release();
+            continue;
+        }
+        if (o.dump) {
+            Dump(uia, root);
+            root->Release();
+            continue;
+        }
+        if (!o.click.empty()) {
+            SetForegroundWindow(hwnd);
+            Sleep(300);
+            for (auto& spec : o.click) {
+                std::wstring name = spec;
+                CONTROLTYPEID type = 0;
+                size_t hash = spec.find(L'#');
+                if (hash != std::wstring::npos) {
+                    name = spec.substr(0, hash);
+                    type = _wtoi(spec.c_str() + hash + 1);
+                }
+                IUIAutomationElement* e = FindByName(uia, root, name.c_str(), type);
+                if (!e) {
+                    IUIAutomationElement* desktop = nullptr;
+                    if (SUCCEEDED(uia->GetRootElement(&desktop))) {
+                        e = FindByName(uia, desktop, name.c_str(), type);
+                        desktop->Release();
+                    }
+                }
+                bool ok = e && Click(e);
+                printf("  click \"%ls\": %s\n", name.c_str(), ok ? "done" : "failed");
+                Report(ok, "click");
+                if (e) e->Release();
+                Sleep(1000);
+            }
+            root->Release();
+            continue;
+        }
+        for (auto& name : o.expect) {
+            IUIAutomationElement* e = FindByName(uia, root, name.c_str());
+            printf("  element \"%ls\" %s\n", name.c_str(), e ? "present" : "absent");
+            Report(e != nullptr, "expected element present");
+            if (e) e->Release();
+        }
         IUIAutomationElement* tab = FindByName(uia, root, kOwn[0].label);
+        if (o.expectAbsent) {
+            Report(tab == nullptr, "tab ExplorerTint absent");
+            if (tab) tab->Release();
+            SavePng(hwnd, png + suffix);
+            root->Release();
+            continue;
+        }
         Report(tab != nullptr, "tab ExplorerTint present");
         if (tab) {
             SetForegroundWindow(hwnd);
@@ -547,16 +678,19 @@ int Probe(const std::wstring& png, bool toggle) {
             }
             Report(all, "group controls present after selecting the tab");
             SavePng(hwnd, png + suffix, true);
-            IUIAutomationElement* box = toggle ? FindByName(uia, root, kOwn[2].label) : nullptr;
+            IUIAutomationElement* box = o.toggle ? FindByName(uia, root, kOwn[2].label) : nullptr;
             if (box) {
                 int before = ReadToggle(box);
                 bool ok = Toggle(box);
                 box->Release();
-                Sleep(500);
-                ActivateTab(tab);
-                Sleep(800);
+                Sleep(600);
                 int after = -1;
-                if ((box = FindByName(uia, root, kOwn[2].label)) != nullptr) {
+                if ((box = FindByName(uia, root, kOwn[2].label)) == nullptr) {
+                    ActivateTab(tab);
+                    Sleep(800);
+                    box = FindByName(uia, root, kOwn[2].label);
+                }
+                if (box) {
                     after = ReadToggle(box);
                     box->Release();
                 }
@@ -570,7 +704,7 @@ int Probe(const std::wstring& png, bool toggle) {
         }
         root->Release();
     }
-    Report(index > 0, "at least one Explorer window");
+    Report(index > 0, "at least one matching Explorer window");
     uia->Release();
     Gdiplus::GdiplusShutdown(gdip);
     printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");
@@ -595,10 +729,18 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!_wcsicmp(mode, L"--check")) return Check(file, out);
     if (!_wcsicmp(mode, L"--probe")) {
-        bool toggle = false;
-        for (int i = 2; i < argc; i++)
-            if (!_wcsicmp(argv[i], L"--toggle")) toggle = true;
-        return Probe(png + L"-explorer", toggle);
+        ProbeOptions o;
+        for (int i = 2; i < argc; i++) {
+            if (!_wcsicmp(argv[i], L"--toggle")) o.toggle = true;
+            else if (!_wcsicmp(argv[i], L"--absent")) o.expectAbsent = true;
+            else if (!_wcsicmp(argv[i], L"--dump")) o.dump = true;
+            else if (!_wcsicmp(argv[i], L"--type") && i + 2 < argc) { o.typeInto = argv[++i]; o.typeText = argv[++i]; }
+            else if (!_wcsicmp(argv[i], L"--hwnd") && i + 1 < argc) o.hwnd = (HWND)(ULONG_PTR)_wtoi64(argv[++i]);
+            else if (!_wcsicmp(argv[i], L"--title") && i + 1 < argc) o.title = argv[++i];
+            else if (!_wcsicmp(argv[i], L"--expect") && i + 1 < argc) o.expect.push_back(argv[++i]);
+            else if (!_wcsicmp(argv[i], L"--click") && i + 1 < argc) o.click.push_back(argv[++i]);
+        }
+        return Probe(png + L"-explorer", o);
     }
     if (!_wcsicmp(mode, L"--show")) {
         bool patched = argc > 2 && !_wcsicmp(argv[2], L"patched");
@@ -606,6 +748,6 @@ int wmain(int argc, wchar_t** argv) {
     }
     printf("usage: RibbonTest --check [--file blob] [--out patched.bin]\n"
            "       RibbonTest --show original|patched [--full] [--png prefix]\n"
-           "       RibbonTest --probe [--toggle] [--png prefix]\n");
+           "       RibbonTest --probe [--toggle] [--absent] [--title text] [--expect name]... [--png prefix]\n");
     return 2;
 }

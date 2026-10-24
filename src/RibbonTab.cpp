@@ -2,6 +2,7 @@
 #include "ImportPatch.h"
 #include "RibbonPatch.h"
 #include <ole2.h>
+#include <commctrl.h>
 #include <initguid.h>
 #include <UIRibbon.h>
 #include <UIRibbonPropertyHelpers.h>
@@ -48,7 +49,9 @@ DestroyFn s_destroy = nullptr;
 CreateCommandFn s_createCommand = nullptr;
 void** s_appVtable = nullptr;
 std::map<UINT32, bool> s_state;
-thread_local IUIFramework* t_framework = nullptr;
+std::map<HWND, IUIFramework*> s_hosts;     // ribbon host window -> its framework
+UINT s_refreshMessage = 0;
+const UINT_PTR kSubclassId = 0x7E00;
 
 bool Serving() { return s_enabled && !s_blob.empty(); }
 
@@ -107,8 +110,10 @@ public:
         if (own->boolean) {
             AcquireSRWLockExclusive(&s_lock);
             s_state[id] = !s_state[id];
+            std::vector<HWND> hosts;
+            for (auto& h : s_hosts) hosts.push_back(h.first);
             ReleaseSRWLockExclusive(&s_lock);
-            if (t_framework) t_framework->InvalidateUICommand(id, UI_INVALIDATIONS_PROPERTY, &UI_PKEY_BooleanValue);
+            for (HWND h : hosts) PostMessageW(h, s_refreshMessage, 0, 0);
         }
         return S_OK;
     }
@@ -144,6 +149,27 @@ bool PatchSlot(void** vtable, int slot, void* hook) {
     return true;
 }
 
+LRESULT CALLBACK HostProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+
+void ForgetHost(HWND hwnd) {
+    RemoveWindowSubclass(hwnd, HostProc, kSubclassId);
+    AcquireSRWLockExclusive(&s_lock);
+    s_hosts.erase(hwnd);
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
+// Runs on each ribbon host thread, where its framework may be called.
+LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    if (msg == s_refreshMessage && s_refreshMessage) {
+        auto fw = (IUIFramework*)ref;
+        for (auto& c : kOwn)
+            if (c.boolean) fw->InvalidateUICommand(c.id, UI_INVALIDATIONS_PROPERTY, &UI_PKEY_BooleanValue);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) ForgetHost(hwnd);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 HRESULT STDMETHODCALLTYPE HookInitialize(IUIFramework* fw, HWND hwnd, IUIApplication* app) {
     if (app) {
         void** vtable = *(void***)app;
@@ -159,13 +185,23 @@ HRESULT STDMETHODCALLTYPE HookInitialize(IUIFramework* fw, HWND hwnd, IUIApplica
         ReleaseSRWLockExclusive(&s_lock);
         if (!known) Log(L"ribbon: unexpected application vtable %p", vtable);
     }
-    t_framework = fw;
-    Log(L"ribbon: framework initialized for window %p", hwnd);
-    return s_initialize(fw, hwnd, app);
+    HRESULT hr = s_initialize(fw, hwnd, app);
+    if (SUCCEEDED(hr) && hwnd && SetWindowSubclass(hwnd, HostProc, kSubclassId, (DWORD_PTR)fw)) {
+        AcquireSRWLockExclusive(&s_lock);
+        s_hosts[hwnd] = fw;
+        ReleaseSRWLockExclusive(&s_lock);
+    }
+    Log(L"ribbon: framework initialized for window %p (0x%08X)", hwnd, hr);
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE HookDestroy(IUIFramework* fw) {
-    if (t_framework == fw) t_framework = nullptr;
+    HWND host = nullptr;
+    AcquireSRWLockShared(&s_lock);
+    for (auto& h : s_hosts)
+        if (h.second == fw) host = h.first;
+    ReleaseSRWLockShared(&s_lock);
+    if (host) ForgetHost(host);
     return s_destroy(fw);
 }
 
@@ -204,6 +240,7 @@ BOOL CALLBACK Install(PINIT_ONCE, PVOID, PVOID*) {
         return TRUE;
     }
 
+    s_refreshMessage = RegisterWindowMessageW(L"ExplorerTint.RibbonRefresh");
     s_blob = std::move(blob);
     int slots = PatchImports(ui, nullptr, "FindResourceW", (void*)HookFindResourceW)
               + PatchImports(ui, nullptr, "FindResourceExW", (void*)HookFindResourceExW)
