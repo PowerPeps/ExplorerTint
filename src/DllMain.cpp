@@ -13,6 +13,7 @@
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "propsys.lib")
 
 HINSTANCE g_hinst = nullptr;
 LONG g_cRefModule = 0;

@@ -1,4 +1,5 @@
 #include "FolderHooks.h"
+#include "Order.h"
 #include <shlobj.h>
 
 namespace {
@@ -82,16 +83,53 @@ bool IsSystem(IShellFolder* folder, PCUIDLIST_RELATIVE pidl) {
     return ItemAttributes(folder, (PCUITEMID_CHILD)pidl, attrs) && IsSystemItem(attrs);
 }
 
+HRESULT Result(int order) {
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, (USHORT)(short)order);
+}
+
+bool IsHostColumn(IShellFolder* self, UINT column) {
+    SHCOLUMNID scid;
+    return column && SUCCEEDED(static_cast<IShellFolder2*>(self)->MapColumnToSCID(column, &scid)) &&
+           IsEqualPropertyKey(scid, Order::HostKey());
+}
+
+std::wstring PathOf(IShellFolder* folder) {
+    std::wstring path;
+    IPersistFolder2* pf = nullptr;
+    if (FAILED(folder->QueryInterface(IID_PPV_ARGS(&pf)))) return path;
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(pf->GetCurFolder(&pidl))) {
+        wchar_t buf[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, buf)) path = buf;
+        CoTaskMemFree(pidl);
+    }
+    pf->Release();
+    return path;
+}
+
+// Ranked items first in rank order, then the others by name.
+HRESULT CompareByOrder(const Patched* p, IShellFolder* self, PCUIDLIST_RELATIVE a, PCUIDLIST_RELATIVE b) {
+    std::wstring path = PathOf(self);
+    WIN32_FIND_DATAW fa, fb;
+    if (path.empty() || FAILED(SHGetDataFromIDListW(self, (PCUITEMID_CHILD)a, SHGDFIL_FINDDATA, &fa, sizeof(fa))) ||
+        FAILED(SHGetDataFromIDListW(self, (PCUITEMID_CHILD)b, SHGDFIL_FINDDATA, &fb, sizeof(fb))))
+        return p->compare(self, 0, a, b);
+    int ra = Order::Rank(path, fa.cFileName), rb = Order::Rank(path, fb.cFileName);
+    if (ra && rb && ra != rb) return Result(ra < rb ? -1 : 1);
+    if (!ra != !rb) return Result(ra ? -1 : 1);
+    return p->compare(self, 0, a, b);
+}
+
 HRESULT STDMETHODCALLTYPE HookCompareIDs(IShellFolder* self, LPARAM lp, PCUIDLIST_RELATIVE a, PCUIDLIST_RELATIVE b) {
     const Patched* p = Find(self);
     if (!p) return E_FAIL;
-    HRESULT hr = p->compare(self, lp, a, b);
-    if (!s_systemLast || (lp & ~(LPARAM)SHCIDS_COLUMNMASK) || FAILED(hr) || !IsChild(a) || !IsChild(b)) return hr;
-    bool sa = IsSystem(self, a), sb = IsSystem(self, b);
-    if (sa == sb) return hr;
-    short order = sa ? 1 : -1;
-    if (SortDescending(self)) order = -order;
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, (USHORT)order);
+    if ((lp & ~(LPARAM)SHCIDS_COLUMNMASK) || !IsChild(a) || !IsChild(b)) return p->compare(self, lp, a, b);
+    if (s_systemLast) {
+        bool sa = IsSystem(self, a), sb = IsSystem(self, b);
+        if (sa != sb) return Result((sa ? 1 : -1) * (SortDescending(self) ? -1 : 1));
+    }
+    if (IsHostColumn(self, (UINT)(lp & SHCIDS_COLUMNMASK))) return CompareByOrder(p, self, a, b);
+    return p->compare(self, lp, a, b);
 }
 
 bool IsHiddenName(const wchar_t* name) {

@@ -2,6 +2,7 @@
 #include "FolderHooks.h"
 #include "GitStatus.h"
 #include "ImportPatch.h"
+#include "OrderColumn.h"
 #include "Settings.h"
 #include <commctrl.h>
 #include <psapi.h>
@@ -32,6 +33,7 @@ struct ViewTint {
     COLORREF backColor = 0;
     int cachedIndex = -1;
     const StateStyle* cachedStyle = nullptr;
+    OrderColumn* order = nullptr;
 };
 
 bool IsLight(COLORREF c) {
@@ -107,7 +109,11 @@ LRESULT OnCustomDraw(ViewTint* t, NMLVCUSTOMDRAW* cd, LRESULT r) {
         t->backColor = ListBack(t->list);
         t->textColor = ListView_GetTextColor(t->list);
         if (t->dark && !IsLight(t->textColor)) t->textColor = kDarkText;
-        return r | CDRF_NOTIFYITEMDRAW;
+        return r | CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+    }
+    if (stage == CDDS_POSTPAINT) {
+        OrderColumnPostPaint(t->order, cd->nmcd.hdc);
+        return r;
     }
     if ((stage & ~CDDS_SUBITEM) != CDDS_ITEMPREPAINT) return r;
 
@@ -274,6 +280,8 @@ void Destroy(ViewTint* t) {
 
 LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
     auto t = (ViewTint*)ref;
+    LRESULT result;
+    if (OrderColumnListMessage(t->order, hwnd, msg, wp, lp, result)) return result;
     if (msg == WM_NOTIFY && t->dark) {
         auto hdr = (NMHDR*)lp;
         if (hdr->code == NM_CUSTOMDRAW && hdr->hwndFrom == ListView_GetHeader(hwnd)) {
@@ -302,12 +310,19 @@ LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
             LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
             return OnCustomDraw(t, (NMLVCUSTOMDRAW*)lp, r);
         }
+        if (hdr->hwndFrom == t->list && hdr->code == LVN_GETDISPINFOW && t->order) {
+            LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+            OrderColumnDispInfo(t->order, (NMLVDISPINFOW*)lp);
+            return r;
+        }
     } else if (msg == GitStatus::RefreshMessage()) {
         InvalidateRect(t->list, nullptr, FALSE);
         return 0;
     } else if (msg == WM_NCDESTROY) {
         GitStatus::RemoveListener(hwnd);
         UnregisterSortView(t->folder);
+        DestroyOrderColumn(t->order);
+        t->order = nullptr;
         RemoveWindowSubclass(hwnd, SubclassProc, id);
         Destroy(t);
     }
@@ -349,6 +364,7 @@ void AttachViewTint(IShellView* view) {
     ApplyDarkList(t);
     SetWindowSubclass(list, ListSubclassProc, kSubclassId, (DWORD_PTR)t);
     SetWindowSubclass(defView, SubclassProc, kSubclassId, (DWORD_PTR)t);
+    t->order = CreateOrderColumn(list, t->folderView, path);
     GitStatus::AddListener(defView);
     InvalidateRect(list, nullptr, TRUE);
 }
