@@ -32,7 +32,10 @@ explorer.exe
      ├─ Bho           suit la navigation de la fenêtre, attache un ViewTint à chaque vue
      ├─ ViewTint      sous-classe SHELLDLL_DefView, colore les lignes dans NM_CUSTOMDRAW
      ├─ GitStatus     cache des états par dépôt, git.exe en tâche de fond, surveillance disque
-     └─ Settings      HKCU\Software\ExplorerTint
+     ├─ FolderHooks   GetAttributesOf / CompareIDs de CFSFolder (phases 2 et 3)
+     ├─ RibbonTab     onglet ExplorerTint injecté dans le ruban (phase 4)
+     ├─ SettingsDialog fenêtre de réglages ouverte depuis le ruban
+     └─ Settings      HKCU\Software\ExplorerTint, surveillée en continu
 ```
 
 ## 3. Composants
@@ -81,10 +84,13 @@ Clé `HKCU\Software\ExplorerTint` :
 | `GitPath` | SZ | vide | Chemin de `git.exe` (sinon recherche dans le `PATH`) |
 | `SystemText` / `SystemBack` | SZ | `#80808099` / vide | Couleurs des éléments système (phase 2) |
 | `SystemLast` | DWORD | 1 | Éléments système en fin de liste (phase 2) |
+| `HideNames` | DWORD | 1 | Active le traitement de `HiddenNames` (phase 2) |
 | `HiddenNames` | SZ | `.claude;.bin;.build;.git;.github;.ia;.idea` | Noms affichés comme cachés (phase 2) |
-| `RibbonTab` | DWORD | 1 | Onglet ExplorerTint dans le ruban (phase 4) |
+| `RibbonTab` | DWORD | 1 | Onglet ExplorerTint dans le ruban (phase 4, nouvelles fenêtres) |
 
-Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relecture à chaque navigation ; l'onglet du ruban (phase 4) écrira dans cette clé.
+Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`.
+
+Prise en compte immédiate : chaque processus Explorer surveille la clé (`RegNotifyChangeKeyValue` + `RegisterWaitForSingleObject`), relit les valeurs 100 ms après la dernière modification et publie un instantané partagé (`CurrentSettings()`). Les fenêtres abonnées reçoivent le message enregistré `ExplorerTint.SettingsChanged` : recalcul du dépôt si `Git` ou `GitPath` change, `IShellView::Refresh` si `SystemLast`, `HideNames` ou `HiddenNames` change, simple redessin sinon. Une modification faite dans une fenêtre, dans un autre processus Explorer ou directement dans le registre s'applique partout **[vérifié]**. `ClassicList` et `RibbonTab` ne valent que pour les fenêtres ouvertes ensuite.
 
 ## 4. Phases suivantes
 
@@ -109,7 +115,20 @@ Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relectu
 ### Phase 4 — onglet du ruban (G4)
 
 - Le ruban est la ressource `UIFILE / EXPLORER_RIBBON` d'`ExplorerFrame.dll` **[vérifié, ressource locale]**, au format binaire du Windows Ribbon Framework, lisible avec [UICC_BML_Parser](https://github.com/rikka0w0/UICC_BML_Parser).
-- Piste : servir un ruban modifié en interceptant le chargement de cette ressource, puis brancher les commandes en interceptant `IUIApplication::OnCreateUICommand`. Aucun précédent connu ; prototype dédié avant tout engagement.
+- Ressource modifiée — `RibbonPatch` : l'onglet Affichage (`0x1003`) et son groupe « Afficher/masquer » (`0x2024`) sont clonés avec de nouveaux identifiants (`0x7E00` onglet, `0x7E01` groupe, `0x7E02`–`0x7E05` contrôles), puis le binaire est réécrit avec longueurs, adresses et table de pointeurs recalculées. Testé sur la ressource locale par `tests/RibbonTest.exe --check` **[vérifié]**.
+- Injection — `RibbonTab` : interception de `FindResourceW/ExW`, `SizeofResource`, `LoadResource` et `LockResource` dans la table d'import de `UIRibbon.dll`, pour servir la ressource modifiée ; interception de `IUIFramework::Initialize` / `Destroy` (table virtuelle de `CLSID_UIRibbonFramework`) ; au premier `Initialize`, remplacement de `IUIApplication::OnCreateUICommand` d'Explorer pour répondre aux identifiants `0x7E02`–`0x7E05`. Chaque fenêtre hôte du ruban est sous-classée.
+- Contrôles de l'onglet :
+
+| Id | Contrôle | Effet |
+|---|---|---|
+| `0x7E02` | case « Couleurs Git » | `Git` |
+| `0x7E03` | case « Système en fin de liste » | `SystemLast` |
+| `0x7E04` | case « Noms cachés » | `HideNames` |
+| `0x7E05` | bouton « Paramètres » | ouvre `SettingsDialog` |
+
+- Libellés et infobulles en français ou en anglais selon la langue de l'interface (`GetUserDefaultUILanguage`) ; icône engrenage tirée de `shell32.dll` (index 316), adaptée au DPI. L'état des cases suit `CurrentSettings()` et se met à jour dans toutes les fenêtres à chaque changement de la clé **[vérifié]**.
+- `SettingsDialog` : fenêtre modale (une seule à la fois) avec les cinq options, les huit couleurs (champ texte + aperçu sur damier, sélecteur Windows qui conserve l'opacité), la liste des noms cachés et le chemin de `git.exe`. Boutons Défauts, OK, Annuler, Appliquer ; une couleur invalide est signalée et rien n'est écrit. Thème sombre quand Explorer est sombre. Écrit toutes les valeurs de la clé, ce qui déclenche la prise en compte immédiate décrite en 3.5 **[vérifié]**.
+- Limite connue : la vérification a été faite avec l'interface en anglais ; les textes français n'ont pas été vus à l'écran.
 
 ## 5. Arborescence
 
@@ -117,8 +136,9 @@ Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relectu
 ExplorerTint/
   build.bat            compilation MSVC (x64), même schéma que Junct
   ExplorerTint.def     exports COM
-  ExplorerTint.rc      version + manifeste Common Controls v6
+  ExplorerTint.rc      version, manifeste Common Controls v6, fenêtre de réglages
   src/                 code C++
+  tests/               RibbonTest (vérification du binaire du ruban, sonde UI Automation)
   docs/                ce document
 ```
 

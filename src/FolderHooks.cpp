@@ -19,8 +19,6 @@ struct Patched {
 
 Patched s_patched[4];
 volatile LONG s_patchedCount;
-bool s_systemLast;
-std::vector<std::wstring> s_hiddenNames;
 INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
 thread_local bool t_inAttributes;
 
@@ -124,7 +122,7 @@ HRESULT STDMETHODCALLTYPE HookCompareIDs(IShellFolder* self, LPARAM lp, PCUIDLIS
     const Patched* p = Find(self);
     if (!p) return E_FAIL;
     if ((lp & ~(LPARAM)SHCIDS_COLUMNMASK) || !IsChild(a) || !IsChild(b)) return p->compare(self, lp, a, b);
-    if (s_systemLast) {
+    if (CurrentSettings()->systemLast) {
         bool sa = IsSystem(self, a), sb = IsSystem(self, b);
         if (sa != sb) return Result((sa ? 1 : -1) * (SortDescending(self) ? -1 : 1));
     }
@@ -132,17 +130,17 @@ HRESULT STDMETHODCALLTYPE HookCompareIDs(IShellFolder* self, LPARAM lp, PCUIDLIS
     return p->compare(self, lp, a, b);
 }
 
-bool IsHiddenName(const wchar_t* name) {
+bool IsHiddenName(const Settings& s, const wchar_t* name) {
     std::wstring lower = Lower(name);
-    for (auto& n : s_hiddenNames)
+    for (auto& n : s.hiddenNames)
         if (n == lower) return true;
     return false;
 }
 
-bool LooksHidden(IShellFolder* folder, PCUITEMID_CHILD child) {
+bool LooksHidden(const Settings& s, IShellFolder* folder, PCUITEMID_CHILD child) {
     WIN32_FIND_DATAW fd;
     if (FAILED(SHGetDataFromIDListW(folder, child, SHGDFIL_FINDDATA, &fd, sizeof(fd)))) return false;
-    return (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) || IsHiddenName(fd.cFileName);
+    return (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) || IsHiddenName(s, fd.cFileName);
 }
 
 HRESULT STDMETHODCALLTYPE HookGetAttributesOf(IShellFolder* self, UINT cidl, PCUITEMID_CHILD_ARRAY items, SFGAOF* inOut) {
@@ -150,11 +148,12 @@ HRESULT STDMETHODCALLTYPE HookGetAttributesOf(IShellFolder* self, UINT cidl, PCU
     if (!p) return E_FAIL;
     SFGAOF wanted = inOut ? (*inOut & kHiddenFlags) : 0;
     HRESULT hr = p->attributes(self, cidl, items, inOut);
-    if (FAILED(hr) || !wanted || !cidl || !items || (*inOut & wanted) == wanted || t_inAttributes || s_hiddenNames.empty())
-        return hr;
+    if (FAILED(hr) || !wanted || !cidl || !items || (*inOut & wanted) == wanted || t_inAttributes) return hr;
+    auto settings = CurrentSettings();
+    if (!settings->hideNames || settings->hiddenNames.empty()) return hr;
     t_inAttributes = true;
     bool all = true;
-    for (UINT i = 0; i < cidl && all; i++) all = LooksHidden(self, items[i]);
+    for (UINT i = 0; i < cidl && all; i++) all = LooksHidden(*settings, self, items[i]);
     t_inAttributes = false;
     if (all) *inOut |= wanted;
     return hr;
@@ -206,11 +205,7 @@ void PatchFolder(const wchar_t* path) {
     folder->Release();
 }
 
-BOOL CALLBACK Install(PINIT_ONCE, void* param, void**) {
-    auto settings = (const Settings*)param;
-    s_systemLast = settings->systemLast;
-    s_hiddenNames = settings->hiddenNames;
-
+BOOL CALLBACK Install(PINIT_ONCE, void*, void**) {
     wchar_t windows[MAX_PATH];
     UINT n = GetWindowsDirectoryW(windows, ARRAYSIZE(windows));
     if (!n || n >= ARRAYSIZE(windows)) return TRUE;
@@ -222,8 +217,8 @@ BOOL CALLBACK Install(PINIT_ONCE, void* param, void**) {
 
 }
 
-void InstallFolderHooks(const Settings& settings) {
-    InitOnceExecuteOnce(&s_once, Install, (void*)&settings, nullptr);
+void InstallFolderHooks() {
+    InitOnceExecuteOnce(&s_once, Install, nullptr, nullptr);
 }
 
 bool ItemAttributes(IShellFolder* folder, PCUITEMID_CHILD child, DWORD& attrs) {

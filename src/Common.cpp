@@ -47,6 +47,24 @@ void Log(const wchar_t* fmt, ...) {
     ReleaseSRWLockExclusive(&s_logLock);
 }
 
+bool IsDarkMode() {
+    DWORD light = 1, size = sizeof(light);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
+    return light == 0;
+}
+
+// uxtheme ordinal 133, undocumented, Windows 10 1809+.
+void AllowDarkMode(HWND hwnd) {
+    typedef BOOL (WINAPI* AllowDarkModeForWindow_t)(HWND, BOOL);
+    static auto fn = (AllowDarkModeForWindow_t)GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), MAKEINTRESOURCEA(133));
+    if (fn) fn(hwnd, TRUE);
+}
+
+bool UiFrench() {
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_FRENCH;
+}
+
 std::wstring Lower(std::wstring s) {
     if (!s.empty()) CharLowerBuffW(&s[0], (DWORD)s.size());
     return s;

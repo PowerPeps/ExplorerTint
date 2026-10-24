@@ -24,6 +24,7 @@ struct ViewTint {
     IFolderView* folderView = nullptr;
     IShellFolder* folder = nullptr;
     Settings settings;
+    std::wstring path;
     std::wstring repo;
     std::wstring prefix;  // folder path relative to the repository root, with a trailing backslash
     bool dark = false;
@@ -66,7 +67,7 @@ bool ItemName(ViewTint* t, PCUITEMID_CHILD child, std::wstring& name) {
 
 const StateStyle* GitStyle(ViewTint* t, PCUITEMID_CHILD child) {
     std::wstring name;
-    if (t->repo.empty() || !ItemName(t, child, name)) return nullptr;
+    if (!t->settings.git || t->repo.empty() || !ItemName(t, child, name)) return nullptr;
     switch (GitStatus::Query(t->repo, t->prefix + name)) {
     case GitState::Staged:    return &t->settings.staged;
     case GitState::Untracked: return &t->settings.untracked;
@@ -140,20 +141,6 @@ LRESULT OnCustomDraw(ViewTint* t, NMLVCUSTOMDRAW* cd, LRESULT r) {
     r |= CDRF_NEWFONT;
     if (st && !sub) r |= CDRF_NOTIFYSUBITEMDRAW;
     return r;
-}
-
-bool IsDarkMode() {
-    DWORD light = 1, size = sizeof(light);
-    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
-    return light == 0;
-}
-
-// uxtheme ordinal 133, undocumented, Windows 10 1809+.
-void AllowDarkMode(HWND hwnd) {
-    typedef BOOL (WINAPI* AllowDarkModeForWindow_t)(HWND, BOOL);
-    static auto fn = (AllowDarkModeForWindow_t)GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), MAKEINTRESOURCEA(133));
-    if (fn) fn(hwnd, TRUE);
 }
 
 COLORREF HeaderTextColor(HWND header) {
@@ -272,6 +259,38 @@ BOOL CALLBACK InstallScrollBarHook(PINIT_ONCE, void*, void**) {
 
 INIT_ONCE s_scrollBarOnce = INIT_ONCE_STATIC_INIT;
 
+void ComputeRepo(ViewTint* t) {
+    t->repo.clear();
+    t->prefix.clear();
+    if (!t->settings.git || t->path.empty()) return;
+    GitStatus::SetGitPath(t->settings.gitPath);
+    t->repo = GitStatus::RepoFor(t->path);
+    if (t->repo.empty()) return;
+    std::wstring lower = Lower(t->path);
+    size_t skip = t->repo.size() + (t->repo.back() == L'\\' ? 0 : 1);
+    if (lower.size() > skip) t->prefix = lower.substr(skip) + L"\\";
+}
+
+void RefreshView(ViewTint* t) {
+    IShellView* view = nullptr;
+    if (t->folderView && SUCCEEDED(t->folderView->QueryInterface(IID_PPV_ARGS(&view)))) {
+        view->Refresh();
+        view->Release();
+    }
+}
+
+void OnSettingsChanged(ViewTint* t) {
+    Settings old = t->settings;
+    t->settings = *CurrentSettings();
+    t->cachedIndex = -1;
+    t->cachedStyle = nullptr;
+    if (old.git != t->settings.git || old.gitPath != t->settings.gitPath) ComputeRepo(t);
+    if (old.systemLast != t->settings.systemLast || old.hideNames != t->settings.hideNames ||
+        old.hiddenNames != t->settings.hiddenNames)
+        RefreshView(t);
+    InvalidateRect(t->list, nullptr, FALSE);
+}
+
 void Destroy(ViewTint* t) {
     if (t->folder) t->folder->Release();
     if (t->folderView) t->folderView->Release();
@@ -318,8 +337,12 @@ LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
     } else if (msg == GitStatus::RefreshMessage()) {
         InvalidateRect(t->list, nullptr, FALSE);
         return 0;
+    } else if (msg == SettingsChangedMessage()) {
+        OnSettingsChanged(t);
+        return 0;
     } else if (msg == WM_NCDESTROY) {
         GitStatus::RemoveListener(hwnd);
+        RemoveSettingsListener(hwnd);
         UnregisterSortView(t->folder);
         DestroyOrderColumn(t->order);
         t->order = nullptr;
@@ -344,21 +367,14 @@ void AttachViewTint(IShellView* view) {
     auto t = new ViewTint;
     t->defView = defView;
     t->list = list;
-    t->settings = LoadSettings();
+    t->settings = *CurrentSettings();
     view->QueryInterface(IID_PPV_ARGS(&t->folderView));
     if (t->folderView) t->folderView->GetFolder(IID_PPV_ARGS(&t->folder));
     RegisterSortView(t->folder, t->folderView);
 
     std::wstring path = FolderPath(t->folderView);
-    if (t->settings.git && !path.empty()) {
-        GitStatus::SetGitPath(t->settings.gitPath);
-        t->repo = GitStatus::RepoFor(path);
-        if (!t->repo.empty()) {
-            std::wstring lower = Lower(path);
-            size_t skip = t->repo.size() + (t->repo.back() == L'\\' ? 0 : 1);
-            if (lower.size() > skip) t->prefix = lower.substr(skip) + L"\\";
-        }
-    }
+    t->path = path;
+    ComputeRepo(t);
     Log(L"view: attached to %s (repo \"%s\")", path.c_str(), t->repo.c_str());
 
     ApplyDarkList(t);
@@ -366,6 +382,7 @@ void AttachViewTint(IShellView* view) {
     SetWindowSubclass(defView, SubclassProc, kSubclassId, (DWORD_PTR)t);
     t->order = CreateOrderColumn(list, t->folderView, path);
     GitStatus::AddListener(defView);
+    AddSettingsListener(defView);
     InvalidateRect(list, nullptr, TRUE);
 }
 

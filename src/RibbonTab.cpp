@@ -1,37 +1,58 @@
 #include "RibbonTab.h"
 #include "ImportPatch.h"
 #include "RibbonPatch.h"
+#include "Settings.h"
+#include "SettingsDialog.h"
 #include <ole2.h>
 #include <commctrl.h>
+#include <shlobj.h>
 #include <initguid.h>
 #include <UIRibbon.h>
 #include <UIRibbonPropertyHelpers.h>
+#include <propvarutil.h>
 #include <map>
 
 namespace {
 
 const wchar_t kResName[] = L"EXPLORER_RIBBON";
 const wchar_t kResType[] = L"UIFILE";
+const int kSettingsIcon = 316;  // shell32.dll icon index: gear
 
 struct OwnCommand {
     WORD id;
-    const wchar_t* label;
-    bool boolean;
+    const wchar_t* fr;
+    const wchar_t* en;
+    const wchar_t* tipFr;
+    const wchar_t* tipEn;
+    const wchar_t* value;       // registry value of a checkbox
+    bool Settings::* field;
 };
 
 const OwnCommand kOwn[] = {
-    { 0x7E00, L"ExplorerTint", false },
-    { 0x7E01, L"Tint", false },
-    { 0x7E02, L"Couleurs Git", true },
-    { 0x7E03, L"Système en dernier", true },
-    { 0x7E04, L"Noms masqués", true },
-    { 0x7E05, L"Paramètres", false },
+    { 0x7E00, L"ExplorerTint", L"ExplorerTint", nullptr, nullptr, nullptr, nullptr },
+    { 0x7E01, L"Tint", L"Tint", nullptr, nullptr, nullptr, nullptr },
+    { 0x7E02, L"Couleurs Git", L"Git colors",
+      L"Colore les noms selon leur état Git (indexé, non suivi, ignoré).",
+      L"Colors names by their Git state (staged, untracked, ignored).", L"Git", &Settings::git },
+    { 0x7E03, L"Système en dernier", L"System items last",
+      L"Place les éléments système (cachés et système) après les autres, quel que soit le tri.",
+      L"Sorts system items (hidden and system) after the others, whatever the sort order.", L"SystemLast",
+      &Settings::systemLast },
+    { 0x7E04, L"Noms masqués", L"Hidden names",
+      L"Affiche les noms listés (.git, .idea…) comme des éléments cachés.",
+      L"Shows the listed names (.git, .idea…) as hidden items.", L"HideNames", &Settings::hideNames },
+    { 0x7E05, L"Paramètres", L"Settings", L"Couleurs, opacité, noms masqués et options.",
+      L"Colors, opacity, hidden names and options.", nullptr, nullptr },
 };
 
 const OwnCommand* Own(UINT32 id) {
     for (auto& c : kOwn)
         if (c.id == id) return &c;
     return nullptr;
+}
+
+const wchar_t* Tr(const wchar_t* fr, const wchar_t* en) {
+    return UiFrench() ? fr : en;
 }
 
 typedef HRESULT(STDMETHODCALLTYPE* InitializeFn)(IUIFramework*, HWND, IUIApplication*);
@@ -48,9 +69,8 @@ InitializeFn s_initialize = nullptr;
 DestroyFn s_destroy = nullptr;
 CreateCommandFn s_createCommand = nullptr;
 void** s_appVtable = nullptr;
-std::map<UINT32, bool> s_state;
 std::map<HWND, IUIFramework*> s_hosts;     // ribbon host window -> its framework
-UINT s_refreshMessage = 0;
+UINT s_openMessage = 0;
 const UINT_PTR kSubclassId = 0x7E00;
 
 bool Serving() { return s_enabled && !s_blob.empty(); }
@@ -90,6 +110,57 @@ LPVOID WINAPI HookLockResource(HGLOBAL g) {
     return LockResource(g);
 }
 
+HWND HostOfThisThread() {
+    HWND found = nullptr;
+    DWORD me = GetCurrentThreadId();
+    AcquireSRWLockShared(&s_lock);
+    for (auto& h : s_hosts)
+        if (GetWindowThreadProcessId(h.first, nullptr) == me) found = h.first;
+    ReleaseSRWLockShared(&s_lock);
+    return found;
+}
+
+// 32 bpp DIB with premultiplied alpha, as drawn by DrawIconEx on a cleared surface.
+IUIImage* SettingsImage(bool large) {
+    HWND host = HostOfThisThread();
+    UINT dpi = host ? GetDpiForWindow(host) : 96;
+    int size = MulDiv(large ? 32 : 16, dpi ? dpi : 96, 96);
+    wchar_t path[MAX_PATH];
+    GetSystemDirectoryW(path, ARRAYSIZE(path));
+    wcscat_s(path, L"\\shell32.dll");
+    HICON icon = nullptr;
+    if (SHDefExtractIconW(path, kSettingsIcon, 0, &icon, nullptr, (UINT)size) != S_OK || !icon) return nullptr;
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bmp) {
+        HDC dc = CreateCompatibleDC(nullptr);
+        HGDIOBJ old = SelectObject(dc, bmp);
+        DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL);
+        SelectObject(dc, old);
+        DeleteDC(dc);
+    }
+    DestroyIcon(icon);
+    if (!bmp) return nullptr;
+
+    IUIImageFromBitmap* factory = nullptr;
+    IUIImage* image = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(UIRibbonImageFromBitmapFactory), nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&factory)))) {
+        if (FAILED(factory->CreateImage(bmp, UI_OWNERSHIP_TRANSFER, &image))) image = nullptr;
+        factory->Release();
+    }
+    if (!image) DeleteObject(bmp);
+    return image;
+}
+
 class Handler : public IUICommandHandler {
 public:
     IFACEMETHODIMP QueryInterface(REFIID iid, void** out) override {
@@ -103,17 +174,17 @@ public:
     IFACEMETHODIMP_(ULONG) AddRef() override { return 2; }
     IFACEMETHODIMP_(ULONG) Release() override { return 1; }
 
-    IFACEMETHODIMP Execute(UINT32 id, UI_EXECUTIONVERB verb, const PROPERTYKEY*, const PROPVARIANT*, IUISimplePropertySet*) override {
+    IFACEMETHODIMP Execute(UINT32 id, UI_EXECUTIONVERB verb, const PROPERTYKEY* key, const PROPVARIANT* value,
+                           IUISimplePropertySet*) override {
         const OwnCommand* own = Own(id);
         if (!own || verb != UI_EXECUTIONVERB_EXECUTE) return S_OK;
-        Log(L"ribbon: execute 0x%04X", id);
-        if (own->boolean) {
-            AcquireSRWLockExclusive(&s_lock);
-            s_state[id] = !s_state[id];
-            std::vector<HWND> hosts;
-            for (auto& h : s_hosts) hosts.push_back(h.first);
-            ReleaseSRWLockExclusive(&s_lock);
-            for (HWND h : hosts) PostMessageW(h, s_refreshMessage, 0, 0);
+        if (own->field) {
+            BOOL on = !(CurrentSettings().get()->*own->field);
+            if (key && *key == UI_PKEY_BooleanValue && value) PropVariantToBoolean(*value, &on);
+            Log(L"ribbon: %s set to %d", own->value, on);
+            SaveSetting(own->value, on ? 1 : 0);
+        } else if (id == 0x7E05) {
+            if (HWND host = HostOfThisThread()) PostMessageW(host, s_openMessage, 0, 0);
         }
         return S_OK;
     }
@@ -121,12 +192,18 @@ public:
     IFACEMETHODIMP UpdateProperty(UINT32 id, REFPROPERTYKEY key, const PROPVARIANT*, PROPVARIANT* value) override {
         const OwnCommand* own = Own(id);
         if (!own) return E_NOTIMPL;
-        if (key == UI_PKEY_Label) return UIInitPropertyFromString(UI_PKEY_Label, own->label, value);
-        if (key == UI_PKEY_BooleanValue && own->boolean) {
-            AcquireSRWLockShared(&s_lock);
-            bool state = s_state[id];
-            ReleaseSRWLockShared(&s_lock);
-            return UIInitPropertyFromBoolean(UI_PKEY_BooleanValue, state, value);
+        if (key == UI_PKEY_Label || key == UI_PKEY_TooltipTitle)
+            return UIInitPropertyFromString(key, Tr(own->fr, own->en), value);
+        if (key == UI_PKEY_TooltipDescription && own->tipFr)
+            return UIInitPropertyFromString(key, Tr(own->tipFr, own->tipEn), value);
+        if (key == UI_PKEY_BooleanValue && own->field)
+            return UIInitPropertyFromBoolean(key, CurrentSettings().get()->*own->field, value);
+        if ((key == UI_PKEY_LargeImage || key == UI_PKEY_SmallImage) && (id == 0x7E05 || id == 0x7E01)) {
+            IUIImage* image = SettingsImage(key == UI_PKEY_LargeImage);
+            if (!image) return E_FAIL;
+            HRESULT hr = UIInitPropertyFromImage(key, image, value);
+            image->Release();
+            return hr;
         }
         return E_NOTIMPL;
     }
@@ -153,6 +230,7 @@ LRESULT CALLBACK HostProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 void ForgetHost(HWND hwnd) {
     RemoveWindowSubclass(hwnd, HostProc, kSubclassId);
+    RemoveSettingsListener(hwnd);
     AcquireSRWLockExclusive(&s_lock);
     s_hosts.erase(hwnd);
     ReleaseSRWLockExclusive(&s_lock);
@@ -160,10 +238,14 @@ void ForgetHost(HWND hwnd) {
 
 // Runs on each ribbon host thread, where its framework may be called.
 LRESULT CALLBACK HostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
-    if (msg == s_refreshMessage && s_refreshMessage) {
+    if (msg == SettingsChangedMessage()) {
         auto fw = (IUIFramework*)ref;
         for (auto& c : kOwn)
-            if (c.boolean) fw->InvalidateUICommand(c.id, UI_INVALIDATIONS_PROPERTY, &UI_PKEY_BooleanValue);
+            if (c.field) fw->InvalidateUICommand(c.id, UI_INVALIDATIONS_PROPERTY, &UI_PKEY_BooleanValue);
+        return 0;
+    }
+    if (msg == s_openMessage && s_openMessage) {
+        ShowSettingsDialog(GetAncestor(hwnd, GA_ROOT));
         return 0;
     }
     if (msg == WM_NCDESTROY) ForgetHost(hwnd);
@@ -190,6 +272,7 @@ HRESULT STDMETHODCALLTYPE HookInitialize(IUIFramework* fw, HWND hwnd, IUIApplica
         AcquireSRWLockExclusive(&s_lock);
         s_hosts[hwnd] = fw;
         ReleaseSRWLockExclusive(&s_lock);
+        AddSettingsListener(hwnd);
     }
     Log(L"ribbon: framework initialized for window %p (0x%08X)", hwnd, hr);
     return hr;
@@ -240,7 +323,7 @@ BOOL CALLBACK Install(PINIT_ONCE, PVOID, PVOID*) {
         return TRUE;
     }
 
-    s_refreshMessage = RegisterWindowMessageW(L"ExplorerTint.RibbonRefresh");
+    s_openMessage = RegisterWindowMessageW(L"ExplorerTint.OpenSettings");
     s_blob = std::move(blob);
     int slots = PatchImports(ui, nullptr, "FindResourceW", (void*)HookFindResourceW)
               + PatchImports(ui, nullptr, "FindResourceExW", (void*)HookFindResourceExW)

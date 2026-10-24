@@ -145,6 +145,12 @@ const OwnCommand kOwn[] = {
     { 0x7E05, L"Paramètres", false },
 };
 
+// Labels shown by ExplorerTint.dll, which follows the user interface language.
+const wchar_t* ProbeLabel(int i) {
+    static const wchar_t* en[] = { L"ExplorerTint", L"Tint", L"Git colors", L"System items last", L"Hidden names", L"Settings" };
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_FRENCH ? kOwn[i].label : en[i];
+}
+
 const OwnCommand* Own(UINT32 id) {
     for (auto& c : kOwn)
         if (c.id == id) return &c;
@@ -656,7 +662,7 @@ int Probe(const std::wstring& png, const ProbeOptions& o) {
             Report(e != nullptr, "expected element present");
             if (e) e->Release();
         }
-        IUIAutomationElement* tab = FindByName(uia, root, kOwn[0].label);
+        IUIAutomationElement* tab = FindByName(uia, root, ProbeLabel(0));
         if (o.expectAbsent) {
             Report(tab == nullptr, "tab ExplorerTint absent");
             if (tab) tab->Release();
@@ -672,29 +678,29 @@ int Probe(const std::wstring& png, const ProbeOptions& o) {
             Sleep(800);
             bool all = true;
             for (int i = 2; i < ARRAYSIZE(kOwn); i++) {
-                IUIAutomationElement* item = FindByName(uia, root, kOwn[i].label);
-                if (!item) { printf("  control \"%ls\" missing\n", kOwn[i].label); all = false; continue; }
+                IUIAutomationElement* item = FindByName(uia, root, ProbeLabel(i));
+                if (!item) { printf("  control \"%ls\" missing\n", ProbeLabel(i)); all = false; continue; }
                 item->Release();
             }
             Report(all, "group controls present after selecting the tab");
             SavePng(hwnd, png + suffix, true);
-            IUIAutomationElement* box = o.toggle ? FindByName(uia, root, kOwn[2].label) : nullptr;
+            IUIAutomationElement* box = o.toggle ? FindByName(uia, root, ProbeLabel(2)) : nullptr;
             if (box) {
                 int before = ReadToggle(box);
                 bool ok = Toggle(box);
                 box->Release();
                 Sleep(600);
                 int after = -1;
-                if ((box = FindByName(uia, root, kOwn[2].label)) == nullptr) {
+                if ((box = FindByName(uia, root, ProbeLabel(2))) == nullptr) {
                     ActivateTab(tab);
                     Sleep(800);
-                    box = FindByName(uia, root, kOwn[2].label);
+                    box = FindByName(uia, root, ProbeLabel(2));
                 }
                 if (box) {
                     after = ReadToggle(box);
                     box->Release();
                 }
-                printf("  toggle \"%ls\": %d -> %d\n", kOwn[2].label, before, after);
+                printf("  toggle \"%ls\": %d -> %d\n", ProbeLabel(2), before, after);
                 Report(ok && before >= 0 && after >= 0 && before != after, "checkbox toggles");
                 PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
             }

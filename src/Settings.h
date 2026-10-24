@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include <memory>
 #include <vector>
 
 struct Rgba {
@@ -21,10 +22,26 @@ struct Settings {
     std::wstring gitPath;
     StateStyle system;
     bool systemLast = true;
+    bool hideNames = true;
     std::vector<std::wstring> hiddenNames;  // lowercase
     bool ribbonTab = true;
 };
 
 Settings LoadSettings();
+Settings DefaultSettings();
+bool SaveSettings(const Settings& s);
+bool SaveSetting(const wchar_t* name, DWORD value);
+
+// Live settings, reloaded when HKCU\Software\ExplorerTint changes. Listeners receive
+// SettingsChangedMessage() on their own thread.
+void WatchSettings();
+std::shared_ptr<const Settings> CurrentSettings();
+UINT SettingsChangedMessage();
+void AddSettingsListener(HWND hwnd);
+void RemoveSettingsListener(HWND hwnd);
+
+std::wstring FormatColor(const Rgba& c);
+std::wstring JoinNames(const std::vector<std::wstring>& names);
+std::vector<std::wstring> SplitNames(const std::wstring& list);
 bool ParseColor(const std::wstring& s, Rgba& out);
 COLORREF Blend(const Rgba& over, COLORREF under);

@@ -1,7 +1,9 @@
 #include "Settings.h"
+#include <algorithm>
 #include <cwctype>
 
 static const wchar_t kKey[] = L"Software\\ExplorerTint";
+static const wchar_t kDefaultHidden[] = L".claude;.bin;.build;.git;.github;.ia;.idea";
 
 static bool ReadDword(HKEY k, const wchar_t* name, DWORD& out) {
     DWORD size = sizeof(out);
@@ -27,7 +29,7 @@ static void ReadColor(HKEY k, const wchar_t* name, Rgba& c) {
     else Log(L"settings: invalid color %s = \"%s\"", name, s.c_str());
 }
 
-static std::vector<std::wstring> SplitNames(const std::wstring& list) {
+std::vector<std::wstring> SplitNames(const std::wstring& list) {
     std::vector<std::wstring> names;
     size_t start = 0;
     while (start <= list.size()) {
@@ -35,10 +37,19 @@ static std::vector<std::wstring> SplitNames(const std::wstring& list) {
         if (end == std::wstring::npos) end = list.size();
         std::wstring name = list.substr(start, end - start);
         size_t a = name.find_first_not_of(L" \t"), b = name.find_last_not_of(L" \t");
-        if (a != std::wstring::npos) names.push_back(Lower(name.substr(a, b - a + 1)));
+        if (a != std::wstring::npos) {
+            std::wstring lower = Lower(name.substr(a, b - a + 1));
+            if (std::find(names.begin(), names.end(), lower) == names.end()) names.push_back(lower);
+        }
         start = end + 1;
     }
     return names;
+}
+
+std::wstring JoinNames(const std::vector<std::wstring>& names) {
+    std::wstring list;
+    for (auto& n : names) list += (list.empty() ? L"" : L";") + n;
+    return list;
 }
 
 bool ParseColor(const std::wstring& s, Rgba& out) {
@@ -59,6 +70,14 @@ bool ParseColor(const std::wstring& s, Rgba& out) {
     return true;
 }
 
+std::wstring FormatColor(const Rgba& c) {
+    if (!c.set) return L"";
+    wchar_t buf[16];
+    if (c.a == 0xFF) swprintf_s(buf, L"#%02X%02X%02X", c.r, c.g, c.b);
+    else swprintf_s(buf, L"#%02X%02X%02X%02X", c.r, c.g, c.b, c.a);
+    return buf;
+}
+
 COLORREF Blend(const Rgba& c, COLORREF under) {
     auto mix = [&](BYTE top, BYTE bottom) {
         return (BYTE)((top * c.a + bottom * (255 - c.a) + 127) / 255);
@@ -66,19 +85,20 @@ COLORREF Blend(const Rgba& c, COLORREF under) {
     return RGB(mix(c.r, GetRValue(under)), mix(c.g, GetGValue(under)), mix(c.b, GetBValue(under)));
 }
 
-Settings LoadSettings() {
+Settings DefaultSettings() {
     Settings s;
     ParseColor(L"#C5783D", s.untracked.text);
     ParseColor(L"#C5783D", s.ignored.text);
     ParseColor(L"#9B49301F", s.ignored.back);
     ParseColor(L"#80808099", s.system.text);
-    std::wstring hidden = L".claude;.bin;.build;.git;.github;.ia;.idea";
+    s.hiddenNames = SplitNames(kDefaultHidden);
+    return s;
+}
 
+Settings LoadSettings() {
+    Settings s = DefaultSettings();
     HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kKey, 0, KEY_READ, &k) != ERROR_SUCCESS) {
-        s.hiddenNames = SplitNames(hidden);
-        return s;
-    }
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return s;
     DWORD d;
     if (ReadDword(k, L"ClassicList", d)) s.classicList = d != 0;
     if (ReadDword(k, L"Git", d)) s.git = d != 0;
@@ -92,9 +112,129 @@ Settings LoadSettings() {
     ReadColor(k, L"SystemText", s.system.text);
     ReadColor(k, L"SystemBack", s.system.back);
     if (ReadDword(k, L"SystemLast", d)) s.systemLast = d != 0;
-    ReadString(k, L"HiddenNames", hidden);
+    if (ReadDword(k, L"HideNames", d)) s.hideNames = d != 0;
+    std::wstring hidden;
+    if (ReadString(k, L"HiddenNames", hidden)) s.hiddenNames = SplitNames(hidden);
     if (ReadDword(k, L"RibbonTab", d)) s.ribbonTab = d != 0;
     RegCloseKey(k);
-    s.hiddenNames = SplitNames(hidden);
     return s;
+}
+
+static LONG WriteDword(HKEY k, const wchar_t* name, DWORD value) {
+    return RegSetValueExW(k, name, 0, REG_DWORD, (const BYTE*)&value, sizeof(value));
+}
+
+static LONG WriteString(HKEY k, const wchar_t* name, const std::wstring& value) {
+    return RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)value.c_str(), (DWORD)((value.size() + 1) * sizeof(wchar_t)));
+}
+
+bool SaveSettings(const Settings& s) {
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS)
+        return false;
+    LONG e = WriteDword(k, L"ClassicList", s.classicList);
+    if (!e) e = WriteDword(k, L"Git", s.git);
+    if (!e) e = WriteString(k, L"StagedText", FormatColor(s.staged.text));
+    if (!e) e = WriteString(k, L"StagedBack", FormatColor(s.staged.back));
+    if (!e) e = WriteString(k, L"UntrackedText", FormatColor(s.untracked.text));
+    if (!e) e = WriteString(k, L"UntrackedBack", FormatColor(s.untracked.back));
+    if (!e) e = WriteString(k, L"IgnoredText", FormatColor(s.ignored.text));
+    if (!e) e = WriteString(k, L"IgnoredBack", FormatColor(s.ignored.back));
+    if (!e) e = WriteString(k, L"GitPath", s.gitPath);
+    if (!e) e = WriteString(k, L"SystemText", FormatColor(s.system.text));
+    if (!e) e = WriteString(k, L"SystemBack", FormatColor(s.system.back));
+    if (!e) e = WriteDword(k, L"SystemLast", s.systemLast);
+    if (!e) e = WriteDword(k, L"HideNames", s.hideNames);
+    if (!e) e = WriteString(k, L"HiddenNames", JoinNames(s.hiddenNames));
+    if (!e) e = WriteDword(k, L"RibbonTab", s.ribbonTab);
+    RegCloseKey(k);
+    if (e) Log(L"settings: save failed (%ld)", e);
+    return e == ERROR_SUCCESS;
+}
+
+bool SaveSetting(const wchar_t* name, DWORD value) {
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS)
+        return false;
+    LONG e = WriteDword(k, name, value);
+    RegCloseKey(k);
+    return e == ERROR_SUCCESS;
+}
+
+namespace {
+
+INIT_ONCE s_watchOnce = INIT_ONCE_STATIC_INIT;
+SRWLOCK s_lock = SRWLOCK_INIT;
+std::shared_ptr<const Settings> s_current;
+std::vector<HWND> s_listeners;
+HKEY s_watchKey = nullptr;
+HANDLE s_watchEvent = nullptr;
+HANDLE s_wait = nullptr;
+UINT s_message = 0;
+
+bool Arm() {
+    const DWORD filter = REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_THREAD_AGNOSTIC;
+    return RegNotifyChangeKeyValue(s_watchKey, TRUE, filter, s_watchEvent, TRUE) == ERROR_SUCCESS;
+}
+
+void CALLBACK OnKeyChanged(void*, BOOLEAN) {
+    Sleep(100);  // lets a burst of writes land before reloading once
+    Arm();
+    auto fresh = std::make_shared<const Settings>(LoadSettings());
+    AcquireSRWLockExclusive(&s_lock);
+    s_current = fresh;
+    std::vector<HWND> listeners = s_listeners;
+    ReleaseSRWLockExclusive(&s_lock);
+    Log(L"settings: reloaded, %zu listener(s)", listeners.size());
+    for (HWND h : listeners) PostMessageW(h, s_message, 0, 0);
+}
+
+BOOL CALLBACK StartWatch(PINIT_ONCE, void*, void**) {
+    s_message = RegisterWindowMessageW(L"ExplorerTint.SettingsChanged");
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kKey, 0, nullptr, 0, KEY_NOTIFY | KEY_READ, nullptr, &s_watchKey, nullptr) !=
+        ERROR_SUCCESS) {
+        Log(L"settings: key not opened for watching");
+        return TRUE;
+    }
+    s_watchEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!s_watchEvent || !Arm() ||
+        !RegisterWaitForSingleObject(&s_wait, s_watchEvent, OnKeyChanged, nullptr, INFINITE, WT_EXECUTEDEFAULT))
+        Log(L"settings: watch not started");
+    return TRUE;
+}
+
+}
+
+void WatchSettings() {
+    InitOnceExecuteOnce(&s_watchOnce, StartWatch, nullptr, nullptr);
+}
+
+std::shared_ptr<const Settings> CurrentSettings() {
+    AcquireSRWLockShared(&s_lock);
+    auto s = s_current;
+    ReleaseSRWLockShared(&s_lock);
+    if (s) return s;
+    auto fresh = std::make_shared<const Settings>(LoadSettings());
+    AcquireSRWLockExclusive(&s_lock);
+    if (!s_current) s_current = fresh;
+    s = s_current;
+    ReleaseSRWLockExclusive(&s_lock);
+    return s;
+}
+
+UINT SettingsChangedMessage() {
+    WatchSettings();
+    return s_message;
+}
+
+void AddSettingsListener(HWND hwnd) {
+    AcquireSRWLockExclusive(&s_lock);
+    if (std::find(s_listeners.begin(), s_listeners.end(), hwnd) == s_listeners.end()) s_listeners.push_back(hwnd);
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
+void RemoveSettingsListener(HWND hwnd) {
+    AcquireSRWLockExclusive(&s_lock);
+    s_listeners.erase(std::remove(s_listeners.begin(), s_listeners.end(), hwnd), s_listeners.end());
+    ReleaseSRWLockExclusive(&s_lock);
 }

@@ -2,7 +2,8 @@
 #include "Settings.h"
 #include <shobjidl.h>
 
-void InstallFolderHooks(const Settings& settings);
+// Settings are read live through CurrentSettings().
+void InstallFolderHooks();
 bool ItemAttributes(IShellFolder* folder, PCUITEMID_CHILD child, DWORD& attrs);
 bool IsSystemItem(DWORD attrs);
 

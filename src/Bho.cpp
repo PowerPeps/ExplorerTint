@@ -91,10 +91,11 @@ public:
             sp->QueryService(SID_SWebBrowserApp, IID_PPV_ARGS(&m_web));
             sp->Release();
         }
-        Settings settings = LoadSettings();
-        InstallClassicList(settings.classicList);
-        InstallFolderHooks(settings);
-        InstallRibbonTab(settings.ribbonTab);
+        WatchSettings();
+        auto settings = CurrentSettings();
+        InstallClassicList(settings->classicList);
+        InstallFolderHooks();
+        InstallRibbonTab(settings->ribbonTab);
         HookViewCreation(true);
         m_hooked = true;
 
