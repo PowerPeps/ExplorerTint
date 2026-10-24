@@ -19,8 +19,8 @@ using namespace Gdiplus;
 
 namespace {
 
-const int kSizes[] = { 16, 20, 24, 32, 40, 48, 64, 256 };
-const int kVersion = 2;  // part of the cached file names: bump when the drawing changes
+const int kSizes[] = { 16, 20, 24, 32, 40, 48, 64, 96, 256 };
+const int kVersion = 3;  // part of the cached file names: bump when the drawing changes
 const BYTE kHaloAlpha = 120;
 
 struct Pixels {
@@ -325,28 +325,125 @@ std::wstring BadgeFile(const std::wstring& badge, int& index) {
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY) ? file : L"";
 }
 
-void DrawFitted(Graphics& g, Bitmap& image) {
-    REAL w = (REAL)image.GetWidth(), h = (REAL)image.GetHeight();
-    if (w <= 0 || h <= 0) return;
-    REAL k = std::min(1 / w, 1 / h);
-    g.DrawImage(&image, RectF((1 - w * k) / 2, 1 - h * k, w * k, h * k));
+struct Raster {
+    int w = 0, h = 0;
+    std::vector<UINT32> px;  // ARGB, top-down
+};
+
+bool FromImage(Bitmap& bmp, Raster& out) {
+    out.w = (int)bmp.GetWidth();
+    out.h = (int)bmp.GetHeight();
+    if (out.w <= 0 || out.h <= 0) return false;
+    out.px.assign((size_t)out.w * out.h, 0);
+    BitmapData bd = {};
+    bd.Width = out.w;
+    bd.Height = out.h;
+    bd.Stride = out.w * 4;
+    bd.PixelFormat = PixelFormat32bppARGB;
+    bd.Scan0 = out.px.data();
+    Rect rc(0, 0, out.w, out.h);
+    if (bmp.LockBits(&rc, ImageLockModeRead | ImageLockModeUserInputBuf, PixelFormat32bppARGB, &bd) != Ok) return false;
+    bmp.UnlockBits(&bd);
+    return true;
+}
+
+bool FromHicon(HICON icon, Raster& out) {
+    Pixels p;
+    if (!FromIcon(icon, p)) return false;
+    out.w = out.h = p.size;
+    out.px = std::move(p.px);
+    return true;
+}
+
+// Image of an .ico file closest to the size wanted (the smallest not below it, else the largest), at its own size.
+bool LoadIco(const std::wstring& file, int pixels, Raster& out) {
+    HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size = {};
+    std::vector<BYTE> data;
+    DWORD got = 0;
+    if (GetFileSizeEx(f, &size) && size.QuadPart < 16 * 1024 * 1024) {
+        data.resize((size_t)size.QuadPart);
+        if (!ReadFile(f, data.data(), (DWORD)data.size(), &got, nullptr) || got != data.size()) data.clear();
+    }
+    CloseHandle(f);
+    if (data.size() < 6 || *(WORD*)(data.data() + 2) != 1) return false;
+    int count = *(WORD*)(data.data() + 4), best = -1, bestSize = 0, bestBits = 0;
+    for (int i = 0; i < count && 6 + 16 * (i + 1) <= (int)data.size(); i++) {
+        const BYTE* e = data.data() + 6 + 16 * i;
+        int s = e[0] ? e[0] : 256, bits = *(WORD*)(e + 6);
+        DWORD bytes = *(DWORD*)(e + 8), offset = *(DWORD*)(e + 12);
+        if ((UINT64)offset + bytes > data.size()) continue;
+        bool better = best < 0 || (s >= pixels ? bestSize < pixels || s < bestSize : s > bestSize) ||
+                      (s == bestSize && bits > bestBits);
+        if (better) best = i, bestSize = s, bestBits = bits;
+    }
+    if (best < 0) return false;
+    const BYTE* e = data.data() + 6 + 16 * best;
+    HICON icon = CreateIconFromResourceEx(data.data() + *(DWORD*)(e + 12), *(DWORD*)(e + 8), TRUE, 0x00030000,
+                                          bestSize, bestSize, LR_DEFAULTCOLOR);
+    bool ok = icon && FromHicon(icon, out);
+    if (icon) DestroyIcon(icon);
+    return ok;
+}
+
+// Pixel art stored enlarged (each pixel a uniform k x k block) goes back to its own resolution.
+void Unblock(Raster& r) {
+    for (int k = std::min(r.w, r.h) / 2; k >= 2; k--) {
+        if (r.w % k || r.h % k) continue;
+        bool uniform = true;
+        for (int y = 0; y < r.h && uniform; y++)
+            for (int x = 0; x < r.w && uniform; x++)
+                uniform = r.px[(size_t)y * r.w + x] == r.px[(size_t)(y - y % k) * r.w + (x - x % k)];
+        if (!uniform) continue;
+        Raster reduced;
+        reduced.w = r.w / k;
+        reduced.h = r.h / k;
+        reduced.px.resize((size_t)reduced.w * reduced.h);
+        for (int y = 0; y < reduced.h; y++)
+            for (int x = 0; x < reduced.w; x++) reduced.px[(size_t)y * reduced.w + x] = r.px[(size_t)y * k * r.w + x * k];
+        r = std::move(reduced);
+        return;
+    }
+}
+
+// Bottom-centred in the badge square. Enlargement and small images (64 pixels or less) are drawn without
+// smoothing, by a whole factor when that fills three quarters of the square; larger images are reduced smoothly.
+void DrawFitted(Graphics& g, Raster& r, int pixels) {
+    if (r.w <= 0 || r.h <= 0) return;
+    Unblock(r);
+    int longest = std::max(r.w, r.h);
+    double scale = (double)pixels / longest;
+    bool sharp = scale >= 1 || longest <= 64;
+    if (scale >= 1 && std::floor(scale) * longest >= 0.75 * pixels) scale = std::floor(scale);
+    int w = std::max(1, (int)lround(r.w * scale)), h = std::max(1, (int)lround(r.h * scale));
+    Bitmap image(r.w, r.h, r.w * 4, PixelFormat32bppARGB, (BYTE*)r.px.data());
+    ImageAttributes wrap;
+    wrap.SetWrapMode(WrapModeTileFlipXY);
+    InterpolationMode mode = g.GetInterpolationMode();
+    g.SetInterpolationMode(sharp ? InterpolationModeNearestNeighbor : InterpolationModeHighQualityBicubic);
+    REAL unit = 1.0f / pixels;
+    g.DrawImage(&image, RectF((pixels - w) / 2 * unit, (pixels - h) * unit, w * unit, h * unit), 0, 0, (REAL)r.w,
+                (REAL)r.h, UnitPixel, &wrap);
+    g.SetInterpolationMode(mode);
 }
 
 bool DrawFile(Graphics& g, const std::wstring& file, int index, int pixels) {
+    Raster r;
     if (IsRaster(file)) {
         Bitmap image(file.c_str());
-        if (image.GetLastStatus() != Ok) return false;
-        DrawFitted(g, image);
-        return true;
+        if (image.GetLastStatus() != Ok || !FromImage(image, r)) return false;
+    } else if (!_wcsicmp(PathFindExtensionW(file.c_str()), L".ico")) {
+        if (!LoadIco(file, pixels, r)) return false;
+    } else {
+        HICON icon = nullptr;
+        if (FAILED(SHDefExtractIconW(file.c_str(), index, 0, &icon, nullptr, pixels)) || !icon) return false;
+        bool ok = FromHicon(icon, r);
+        DestroyIcon(icon);
+        if (!ok) return false;
     }
-    HICON icon = nullptr;
-    if (FAILED(SHDefExtractIconW(file.c_str(), index, 0, &icon, nullptr, pixels)) || !icon) return false;
-    Pixels p;
-    bool ok = FromIcon(icon, p);
-    DestroyIcon(icon);
-    if (!ok) return false;
-    Bitmap image(p.size, p.size, p.size * 4, PixelFormat32bppARGB, (BYTE*)p.px.data());
-    DrawFitted(g, image);
+    DrawFitted(g, r, pixels);
     return true;
 }
 
