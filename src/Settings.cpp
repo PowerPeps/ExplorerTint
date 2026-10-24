@@ -5,7 +5,7 @@
 static const wchar_t kKey[] = L"Software\\ExplorerTint";
 static const wchar_t kDefaultHidden[] = L".claude;.bin;.build;.git;.github;.ia;.idea";
 static const wchar_t kDefaultIcons[] =
-    L"android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk=\"kk\"";
+    L"android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk=\"kk\"#E81123";
 static const wchar_t kDefaultRoots[] = L"D:\\";
 
 static std::wstring Trim(const std::wstring& s) {
@@ -164,6 +164,7 @@ Settings LoadSettings() {
     if (ReadString(k, L"HiddenNames", hidden)) s.hiddenNames = SplitNames(hidden);
     if (ReadDword(k, L"RibbonTab", d)) s.ribbonTab = d != 0;
     if (ReadDword(k, L"RepoIcon", d)) s.repoIcon = d != 0;
+    if (ReadString(k, L"RepoBadge", s.repoBadge)) s.repoBadge = Lower(s.repoBadge);
     std::wstring list;
     if (ReadString(k, L"FolderIcons", list)) s.folderIcons = SplitIcons(list);
     if (ReadString(k, L"IconRoots", list)) s.iconRoots = SplitRoots(list);
@@ -199,6 +200,7 @@ bool SaveSettings(const Settings& s) {
     if (!e) e = WriteString(k, L"HiddenNames", JoinNames(s.hiddenNames));
     if (!e) e = WriteDword(k, L"RibbonTab", s.ribbonTab);
     if (!e) e = WriteDword(k, L"RepoIcon", s.repoIcon);
+    if (!e) e = WriteString(k, L"RepoBadge", s.repoBadge);
     if (!e) e = WriteString(k, L"FolderIcons", JoinIcons(s.folderIcons));
     if (!e) e = WriteString(k, L"IconRoots", JoinNames(s.iconRoots));
     RegCloseKey(k);

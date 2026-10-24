@@ -10,7 +10,7 @@ Cible : Windows 10 (build 19045), Explorer 64 bits, thème sombre. Les points ma
 | G2 | Rendre discrets les éléments « caché + système » et les placer en fin de liste | phase 2 |
 | G3 | Ordre personnalisé des dossiers via une colonne `#`, placée en première position | phase 3 |
 | G4 | Réglages dans un onglet du ruban d'Explorer (pas d'icône dans la zone de notification) | phase 4 |
-| G5 | Icônes de dossier : bleue pour un dépôt Git, badge selon le nom du dossier | phase 5 |
+| G5 | Icônes de dossier : bleue pour un dépôt Git, badge selon le nom du dossier, langages du dépôt | phase 5 |
 
 Style retenu pour G1 (modifiable dans les réglages) :
 
@@ -90,7 +90,8 @@ Clé `HKCU\Software\ExplorerTint` :
 | `HiddenNames` | SZ | `.claude;.bin;.build;.git;.github;.ia;.idea` | Noms affichés comme cachés (phase 2) |
 | `RibbonTab` | DWORD | 1 | Onglet ExplorerTint dans le ruban (phase 4, nouvelles fenêtres) |
 | `RepoIcon` | DWORD | 1 | Icône bleue pour les dossiers de dépôt Git (phase 5) |
-| `FolderIcons` | SZ | `android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk="kk"` | Badge par nom de dossier (phase 5) |
+| `RepoBadge` | SZ | `ring` | Badge des dépôts : `ring` (anneau des langages), `icon` (icône du projet), `bar` (barre des langages), combinables (`icon,ring`) ; vide : aucun (phase 5) |
+| `FolderIcons` | SZ | `android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk="kk"#E81123` | Badge par nom de dossier (phase 5) |
 | `IconRoots` | SZ | `D:\` | Emplacements où les icônes de dossier s'appliquent ; vide : partout (phase 5) |
 
 Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`.
@@ -138,14 +139,23 @@ Prise en compte immédiate : chaque processus Explorer surveille la clé (`RegNo
 ### Phase 5 — icônes de dossier (G5)
 
 - Règles, limitées aux emplacements `IconRoots` (défaut `D:\`) :
-  - dossier contenant `.git` (dossier ou fichier) → icône bleue, dessinée d'après les images fournies (`res/repo16.png`, `repo32`, `repo48`, `repo256` ; les autres tailles en sont réduites) ;
+  - dossier contenant `.git` (dossier ou fichier) → icône bleue : l'icône de dossier du système dont les teintes jaunes (15°–75°) passent à 212°, saturation et luminosité conservées, pour rester dans le ton du dossier jaune ;
   - nom correspondant à une entrée de `FolderIcons` (motif `PathMatchSpec`, insensible à la casse, première entrée gagnante) → badge en bas à droite, comme l'icône du dossier Polices ;
   - les deux se combinent : un dossier `android` qui est un dépôt est bleu avec le badge Android.
-- Badges : nom intégré (`android`, `claude`, `desktop`, `fonts`, `git`, `hardware`, `web`, dessinés en vectoriel avec GDI+), texte entre guillemets (`"kk"`) ou mot inconnu, fichier image (`.png`, `.jpg`, `.bmp`, `.gif`) ou emplacement d'icône `fichier[,index]` (variables d'environnement acceptées). Un liseré sombre semi-transparent détache le badge du dossier et du fond.
+- Badges : nom intégré (`android`, `claude`, `desktop`, `fonts`, `git`, `hardware`, `web`, dessinés en vectoriel avec GDI+), texte entre guillemets avec couleur facultative (`"kk"#E81123`, bleu `#0078D7` par défaut) ou mot inconnu, fichier image (`.png`, `.jpg`, `.bmp`, `.gif`) ou emplacement d'icône `fichier[,index]` (variables d'environnement acceptées). Un liseré sombre semi-transparent détache le badge du dossier et du fond.
 - Construction : base = icône de dossier du système (`SHGetStockIconInfo(SIID_FOLDER)`) ou base bleue, badge composé à chaque taille (16, 20, 24, 32, 40, 48, 64, 256), écrit en `.ico` dans `%LOCALAPPDATA%\ExplorerTint\icons\<empreinte>.ico`. L'empreinte couvre la version du dessin, le type de base, le badge et la date du fichier badge : un changement donne un nouveau fichier, donc pas d'image périmée dans le cache d'icônes du shell. Environ 12 ms par icône, une seule fois **[vérifié, journal]**.
 - Branchement : `IShellIcon::GetIconOf` de `CFSFolder` (table virtuelle commune, `windows.storage.dll`) renvoie l'index obtenu par `Shell_GetCachedImageIndexW` sur ce fichier. DefView passe par cet appel en vue Détails comme en grandes icônes **[vérifié]**.
 - Miniatures : en vue icônes, un dossier contenant des images affiche normalement un aperçu de son contenu, obtenu par `IThumbnailCache::GetThumbnail` (`thumbcache.dll`) et non par `GetUIObjectOf` **[vérifié, trace]**. Pour les dossiers concernés, l'appel renvoie `WTS_E_FAILEDEXTRACTION` et la vue garde l'icône, comme pour un dossier à icône `desktop.ini` **[vérifié]**.
-- Outil : `tests\bin\IconTest.exe <dossier> [badge …]` écrit toutes les variantes en `.ico` pour les inspecter hors d'Explorer.
+- Langages d'un dépôt — `RepoInfo` : approximation de [linguist](https://github.com/github-linguist/linguist), l'outil des statistiques de GitHub.
+  - Source : l'arbre de `HEAD` (`git ls-tree -r -z -l HEAD`), comme GitHub ; taille en octets de chaque fichier.
+  - Comptés : langages de type `programming` et `markup` ; un langage groupé compte pour son parent. Exclus : chemins de `vendor.yml` et `documentation.yml`, liens symboliques, fichiers binaires (octet nul dans les 8000 premiers).
+  - Langage d'un fichier : nom exact, puis extension la plus longue. `.h` suit la règle de `heuristics.yml` (motifs Objective-C, puis C++, sinon C). Autre extension ambiguë : le candidat le plus présent ailleurs dans le dépôt, sinon extension principale, puis langage de `popular.yml`.
+  - Six entrées au plus, le reste regroupé en « Other ». Écart mesuré avec l'API GitHub : 0,1 point au plus sur Caterpillar et Junct **[vérifié, `gh api repos/…/languages`]**.
+  - Icône du projet : `.ico` ou `.png` de l'arbre, notée d'après son nom (`icon`, `app`, `favicon`, `logo`, `ic_launcher`…), sa densité Android et sa profondeur ; un PNG doit être à peu près carré.
+  - Calcul sur un fil dédié (30 à 160 ms par dépôt **[vérifié, journal]**), résultat gardé en mémoire et dans `%LOCALAPPDATA%\ExplorerTint\repos.txt` (en-tête versionné). Le commit de `HEAD` est relu dans les fichiers de `.git` toutes les 5 s au plus ; un nouveau commit relance le calcul, l'ancien résultat sert en attendant. À la fin, `SHChangeNotify(SHCNE_UPDATEITEM)` fait redessiner le dossier **[vérifié]**.
+  - Données : `src/LinguistData.h`, généré par `tools/gen_linguist.ps1` depuis les fichiers YAML de linguist (licence MIT).
+- Badge d'un dépôt (`RepoBadge`), dans l'emplacement en bas à droite : badge de nom > icône du projet > anneau. La barre se dessine en travers du bas du dossier, indépendamment.
+- Outil : `tests\bin\IconTest.exe <dossier> [--hue N] [badge …]` écrit toutes les variantes en `.ico` pour les inspecter hors d'Explorer ; `--repo <chemin>` affiche les langages et l'icône d'un dépôt et écrit ses variantes anneau, barre et icône.
 - Limites : un dossier qui devient dépôt (`git init`) ne change d'icône qu'après rafraîchissement (F5) ; l'arborescence du volet de navigation n'est pas rafraîchie quand les réglages changent.
 
 ## 5. Arborescence
@@ -156,7 +166,8 @@ ExplorerTint/
   ExplorerTint.def     exports COM
   ExplorerTint.rc      version, manifeste Common Controls v6, fenêtre de réglages
   src/                 code C++
-  res/                 images de la base bleue des dépôts Git
+  res/                 anciennes images de la base bleue (inutilisées)
+  tools/               gen_linguist.ps1 (données linguist)
   tests/               RibbonTest (binaire du ruban, sonde UI Automation), IconTest (icônes de dossier)
   docs/                ce document
 ```

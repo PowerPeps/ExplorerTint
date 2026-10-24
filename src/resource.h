@@ -2,11 +2,6 @@
 
 #define IDD_SETTINGS        100
 
-#define IDR_REPO16          200     // blue folder base for Git repositories, PNG
-#define IDR_REPO32          201
-#define IDR_REPO48          202
-#define IDR_REPO256         203
-
 #define IDC_OPTIONS_H       1000
 #define IDC_GIT             1001
 #define IDC_SYSLAST         1002

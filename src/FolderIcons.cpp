@@ -1,5 +1,5 @@
 #include "FolderIcons.h"
-#include "resource.h"
+#include "RepoInfo.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -20,7 +20,7 @@ using namespace Gdiplus;
 namespace {
 
 const int kSizes[] = { 16, 20, 24, 32, 40, 48, 64, 256 };
-const int kVersion = 1;  // part of the cached file names: bump when the drawing changes
+const int kVersion = 2;  // part of the cached file names: bump when the drawing changes
 const BYTE kHaloAlpha = 120;
 
 struct Pixels {
@@ -108,46 +108,6 @@ Pixels Scale(const Pixels& src, int size) {
     return out;
 }
 
-bool ResourcePixels(int id, Pixels& out) {
-    HRSRC r = FindResourceW(g_hinst, MAKEINTRESOURCEW(id), RT_RCDATA);
-    HGLOBAL h = r ? LoadResource(g_hinst, r) : nullptr;
-    const BYTE* data = h ? (const BYTE*)LockResource(h) : nullptr;
-    IStream* stream = data ? SHCreateMemStream(data, SizeofResource(g_hinst, r)) : nullptr;
-    if (!stream) return false;
-    bool ok = false;
-    {
-        Bitmap bmp(stream);
-        ok = bmp.GetLastStatus() == Ok && FromBitmap(bmp, out);
-    }
-    stream->Release();
-    return ok;
-}
-
-std::vector<Pixels> LoadRepoSources() {
-    std::vector<Pixels> sources;
-    for (int id : { IDR_REPO16, IDR_REPO32, IDR_REPO48, IDR_REPO256 }) {
-        Pixels p;
-        if (ResourcePixels(id, p)) sources.push_back(std::move(p));
-    }
-    return sources;
-}
-
-// Exact size, else twice the size, else the smallest larger one.
-bool RepoBase(int size, Pixels& out) {
-    static const std::vector<Pixels> sources = LoadRepoSources();
-    const Pixels* best = nullptr;
-    for (auto& s : sources)
-        if (s.size == size) best = &s;
-    for (auto& s : sources)
-        if (!best && s.size == 2 * size) best = &s;
-    for (auto& s : sources)
-        if (s.size > size && (!best || (best->size != size && best->size != 2 * size && s.size < best->size))) best = &s;
-    if (!best && !sources.empty()) best = &sources.back();
-    if (!best) return false;
-    out = Scale(*best, size);
-    return true;
-}
-
 bool FolderBase(int size, Pixels& out) {
     SHSTOCKICONINFO sii = { sizeof(sii) };
     if (FAILED(SHGetStockIconInfo(SIID_FOLDER, SHGSI_ICONLOCATION, &sii))) return false;
@@ -160,6 +120,37 @@ bool FolderBase(int size, Pixels& out) {
     return ok;
 }
 
+float HueToChannel(float p, float q, float t) {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1.0f / 6) return p + (q - p) * 6 * t;
+    if (t < 0.5f) return q;
+    if (t < 2.0f / 3) return p + (q - p) * (2.0f / 3 - t) * 6;
+    return p;
+}
+
+// Moves the yellow and orange hues of the folder to the given hue, keeping saturation and lightness.
+UINT32 Rehue(UINT32 c, float hue) {
+    float r = ((c >> 16) & 0xFF) / 255.0f, g = ((c >> 8) & 0xFF) / 255.0f, b = (c & 0xFF) / 255.0f;
+    float hi = std::max(r, std::max(g, b)), lo = std::min(r, std::min(g, b)), l = (hi + lo) / 2, d = hi - lo;
+    if (d < 0.04f) return c;
+    float s = l > 0.5f ? d / (2 - hi - lo) : d / (hi + lo);
+    float h = hi == r ? (g - b) / d + (g < b ? 6 : 0) : hi == g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h *= 60;
+    if (h < 15 || h > 75) return c;
+    float t = hue / 360, q = l < 0.5f ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    auto byte = [](float v) { return (UINT32)(std::min(1.0f, std::max(0.0f, v)) * 255 + 0.5f); };
+    return (c & 0xFF000000) | byte(HueToChannel(p, q, t + 1.0f / 3)) << 16 | byte(HueToChannel(p, q, t)) << 8 |
+           byte(HueToChannel(p, q, t - 1.0f / 3));
+}
+
+float s_repoHue = 212;
+
+bool RepoBase(int size, Pixels& out) {
+    if (!FolderBase(size, out)) return false;
+    for (auto& c : out.px) c = Rehue(c, s_repoHue);
+    return true;
+}
 // Badges are drawn in a unit square; px is the size of one pixel in those units.
 
 void RoundRect(GraphicsPath& path, REAL x, REAL y, REAL w, REAL h, REAL r) {
@@ -303,8 +294,8 @@ void Claude(Graphics& g, REAL px) {
     g.FillEllipse(&coral, 0.38f, 0.38f, 0.24f, 0.24f);
 }
 
-void Text(Graphics& g, const std::wstring& text) {
-    Glyphs(g, text.c_str(), L"Segoe UI", FontStyleBold, 1.0f, 0.80f, Color(0x00, 0x78, 0xD7));
+void Text(Graphics& g, const std::wstring& text, const Color& color = Color(0x00, 0x78, 0xD7)) {
+    Glyphs(g, text.c_str(), L"Segoe UI", FontStyleBold, 1.0f, 0.80f, color);
 }
 
 bool IsRaster(const std::wstring& file) {
@@ -374,10 +365,114 @@ Builtin FindBuiltin(const std::wstring& badge) {
     return nullptr;
 }
 
-bool Quoted(const std::wstring& badge) {
-    return badge.size() >= 2 && badge.front() == L'"' && badge.back() == L'"';
+// "text" or "text"#RRGGBB
+bool Quoted(const std::wstring& badge, std::wstring* text = nullptr, Color* color = nullptr) {
+    size_t close = badge.size() >= 2 && badge.front() == L'"' ? badge.find(L'"', 1) : std::wstring::npos;
+    if (close == std::wstring::npos) return false;
+    Rgba rgba;
+    std::wstring suffix = badge.substr(close + 1);
+    if (!suffix.empty() && (!ParseColor(suffix, rgba) || !rgba.set)) return false;
+    if (text) *text = badge.substr(1, close - 1);
+    if (color && rgba.set) *color = Color(rgba.a, rgba.r, rgba.g, rgba.b);
+    return true;
 }
 
+struct Segment {
+    UINT32 color;  // 0xRRGGBB
+    int percent;
+};
+
+bool IsRing(const std::wstring& badge) {
+    return badge.compare(0, 5, L"ring:") == 0;
+}
+
+std::vector<Segment> ParseSegments(const std::wstring& list) {
+    std::vector<Segment> segments;
+    for (size_t pos = 0; pos < list.size();) {
+        size_t end = list.find(L',', pos);
+        if (end == std::wstring::npos) end = list.size();
+        std::wstring item = list.substr(pos, end - pos);
+        size_t slash = item.find(L'/');
+        if (slash != std::wstring::npos) {
+            int percent = _wtoi(item.c_str() + slash + 1);
+            if (percent > 0) segments.push_back({ (UINT32)wcstoul(item.c_str(), nullptr, 16), percent });
+        }
+        pos = end + 1;
+    }
+    return segments;
+}
+
+// Whole percents, so that small changes in the repository reuse the same icon.
+std::wstring FormatSegments(const RepoInfo& info) {
+    std::wstring list;
+    for (auto& l : info.languages) {
+        int percent = (int)lround(l.share * 100);
+        if (percent < 1) continue;
+        wchar_t item[24];
+        swprintf_s(item, L"%s%06X/%d", list.empty() ? L"" : L",", l.color, percent);
+        list += item;
+    }
+    return list;
+}
+
+Color Opaque(UINT32 rgb) {
+    return Color(0xFF, (BYTE)(rgb >> 16), (BYTE)(rgb >> 8), (BYTE)rgb);
+}
+
+// Donut chart of the languages, clockwise from the top, as on GitHub.
+void Ring(Graphics& g, const std::vector<Segment>& segments) {
+    int total = 0;
+    for (auto& s : segments) total += s.percent;
+    if (!total) return;
+    REAL start = -90;
+    for (auto& s : segments) {
+        REAL sweep = 360.0f * s.percent / total;
+        SolidBrush brush(Opaque(s.color));
+        g.FillPie(&brush, RectF(0.04f, 0.04f, 0.92f, 0.92f), start, std::min(sweep + 0.6f, 360.0f));
+        start += sweep;
+    }
+    g.SetCompositingMode(CompositingModeSourceCopy);
+    SolidBrush clear(Color(0, 0, 0, 0));
+    g.FillEllipse(&clear, RectF(0.30f, 0.30f, 0.40f, 0.40f));
+    g.SetCompositingMode(CompositingModeSourceOver);
+}
+
+// Language bar across the bottom of the folder, as on GitHub.
+void DrawBar(Pixels& icon, const std::vector<Segment>& segments) {
+    int n = icon.size, left = n, right = -1, bottom = -1, total = 0;
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++)
+            if ((icon.px[y * n + x] >> 24) >= 128) {
+                left = std::min(left, x);
+                right = std::max(right, x);
+                bottom = std::max(bottom, y);
+            }
+    for (auto& s : segments) total += s.percent;
+    if (right < left || !total) return;
+    int h = std::max(2, (int)lround(n * 0.10)), margin = n < 32 ? 0 : (int)lround(n * 0.04);
+    REAL x0 = (REAL)left, w = (REAL)(right - left + 1), y0 = (REAL)(bottom + 1 - margin - h);
+    Bitmap bmp(n, n, n * 4, PixelFormat32bppARGB, (BYTE*)icon.px.data());
+    Graphics g(&bmp);
+    g.SetSmoothingMode(n < 32 ? SmoothingModeNone : SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    GraphicsPath frame;
+    REAL r = n < 48 ? 0.5f : h / 2.0f;
+    RoundRect(frame, x0, y0, w, (REAL)h, std::max(r, 0.5f));
+    g.SetClip(&frame);
+    REAL x = x0;
+    for (auto& s : segments) {
+        REAL sw = w * s.percent / total;
+        SolidBrush brush(Opaque(s.color));
+        g.FillRectangle(&brush, x, y0, sw + 0.5f, (REAL)h);
+        x += sw;
+    }
+    g.ResetClip();
+    if (n >= 32) {
+        Pen edge(Color(kHaloAlpha, 0, 0, 0), std::max(1.0f, n / 128.0f));
+        g.DrawPath(&edge, &frame);
+    }
+    g.Flush(FlushIntentionSync);
+}
 bool RenderBadge(const std::wstring& badge, int pixels, Pixels& out) {
     out.size = pixels;
     out.px.assign(pixels * pixels, 0);
@@ -390,8 +485,10 @@ bool RenderBadge(const std::wstring& badge, int pixels, Pixels& out) {
     REAL px = 1.0f / pixels;
     bool ok = true;
     int index;
-    std::wstring file;
-    if (Quoted(badge)) Text(g, badge.substr(1, badge.size() - 2));
+    std::wstring file, text;
+    Color color(0x00, 0x78, 0xD7);
+    if (IsRing(badge)) Ring(g, ParseSegments(badge.substr(5)));
+    else if (Quoted(badge, &text, &color)) Text(g, text, color);
     else if (Builtin draw = FindBuiltin(badge)) draw(g, px);
     else if (!(file = BadgeFile(badge, index)).empty()) ok = DrawFile(g, file, index, pixels);
     else Text(g, badge);
@@ -536,18 +633,18 @@ std::wstring IconDir() {
 }
 
 // Identifies the drawing; a badge file adds its write time so an edited file gets a new icon.
-std::wstring CacheKey(bool repo, const std::wstring& badge) {
-    std::wstring key = L"v" + std::to_wstring(kVersion) + (repo ? L"|repo|" : L"|folder|") + badge;
+std::wstring CacheKey(bool repo, const std::wstring& badge, const std::wstring& bar) {
+    std::wstring key = L"v" + std::to_wstring(kVersion) + (repo ? L"|repo|" : L"|folder|") + badge + L"|" + bar;
     int index;
-    std::wstring file = Quoted(badge) || FindBuiltin(badge) ? L"" : BadgeFile(badge, index);
+    std::wstring file = Quoted(badge) || FindBuiltin(badge) || IsRing(badge) ? L"" : BadgeFile(badge, index);
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!file.empty() && GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &fa))
         key += L"|" + std::to_wstring(((UINT64)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime);
     return key;
 }
 
-int IndexFor(bool repo, const std::wstring& badge) {
-    std::wstring key = CacheKey(repo, badge);
+int IndexFor(bool repo, const std::wstring& badge, const std::wstring& bar) {
+    std::wstring key = CacheKey(repo, badge, bar);
     AcquireSRWLockShared(&s_cacheLock);
     auto it = s_cache.find(key);
     int index = it == s_cache.end() ? -2 : it->second;
@@ -562,7 +659,7 @@ int IndexFor(bool repo, const std::wstring& badge) {
     if (!dir.empty() && GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::wstring temp = file + L"." + std::to_wstring(GetCurrentProcessId()) + L"." +
                             std::to_wstring(GetCurrentThreadId()) + L".tmp";
-        if (WriteFolderIcon(temp, repo, badge)) MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (WriteFolderIcon(temp, repo, badge, bar)) MoveFileExW(temp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING);
         else DeleteFileW(temp.c_str());
     }
     index = !dir.empty() && GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES
@@ -577,12 +674,13 @@ int IndexFor(bool repo, const std::wstring& badge) {
 
 }
 
-bool WriteFolderIcon(const std::wstring& file, bool repo, const std::wstring& badge) {
+bool WriteFolderIcon(const std::wstring& file, bool repo, const std::wstring& badge, const std::wstring& bar) {
     if (!UseGdiplus()) return false;
     std::vector<Pixels> images;
     for (int size : kSizes) {
         Pixels icon;
         if (!(repo ? RepoBase(size, icon) : FolderBase(size, icon))) return false;
+        if (!bar.empty()) DrawBar(icon, ParseSegments(bar));
         if (!badge.empty()) {
             int pos, pixels;
             BadgeBox(size, pos, pixels);
@@ -622,13 +720,26 @@ int FolderIconIndex(const Settings& s, const std::wstring& parent, const WIN32_F
         return -1;
     std::wstring dir = parent.back() == L'\\' ? parent : parent + L"\\";
     if (!InRoots(s, dir)) return -1;
-    std::wstring badge;
+    std::wstring badge, bar;
     for (auto& p : s.folderIcons)
         if (PathMatchSpecW(fd.cFileName, p.first.c_str())) {
             badge = p.second;
             break;
         }
-    bool repo = s.repoIcon && GetFileAttributesW((dir + fd.cFileName + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES;
-    if (!repo && badge.empty()) return -1;
-    return IndexFor(repo, badge);
+    std::wstring path = dir + fd.cFileName;
+    bool repo = (s.repoIcon || !s.repoBadge.empty()) && GetFileAttributesW((path + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES;
+    RepoInfo info;
+    if (repo && !s.repoBadge.empty() && GetRepoInfo(path, info)) {
+        auto wants = [&](const wchar_t* style) { return s.repoBadge.find(style) != std::wstring::npos; };
+        if (badge.empty() && wants(L"icon") && !info.icon.empty()) badge = info.icon;
+        else if (badge.empty() && wants(L"ring") && !info.languages.empty()) badge = L"ring:" + FormatSegments(info);
+        if (wants(L"bar") && !info.languages.empty()) bar = FormatSegments(info);
+    }
+    repo = repo && s.repoIcon;
+    if (!repo && badge.empty() && bar.empty()) return -1;
+    return IndexFor(repo, badge, bar);
+}
+
+void SetRepoHue(float hue) {
+    s_repoHue = hue;
 }

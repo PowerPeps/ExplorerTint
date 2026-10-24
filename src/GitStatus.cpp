@@ -50,14 +50,13 @@ std::wstring FindRoot(std::wstring p) {
     }
 }
 
-bool RunGit(const std::wstring& root, std::string& out) {
+bool RunGit(const std::wstring& root, const wchar_t* args, std::string& out) {
     std::wstring dir = root;
     if (dir.back() == L'\\') dir += L'.';
     AcquireSRWLockShared(&g_lock);
     std::wstring exe = g_gitPath.empty() ? L"git.exe" : g_gitPath;
     ReleaseSRWLockShared(&g_lock);
-    std::wstring cmd = L"\"" + exe + L"\" --no-optional-locks -C \"" + dir +
-                       L"\" status --porcelain=v1 -z --ignored=traditional --untracked-files=normal";
+    std::wstring cmd = L"\"" + exe + L"\" --no-optional-locks -C \"" + dir + L"\" " + args;
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     HANDLE rd = nullptr, wr = nullptr;
@@ -101,7 +100,7 @@ bool RunGit(const std::wstring& root, std::string& out) {
     if (WaitForSingleObject(pi.hProcess, kGitTimeoutMs) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    if (code != 0) Log(L"git: status failed in %s (exit %lu)", root.c_str(), code);
+    if (code != 0) Log(L"git: \"%s\" failed in %s (exit %lu)", args, root.c_str(), code);
     return code == 0;
 }
 
@@ -137,7 +136,7 @@ void Parse(const std::string& out, std::unordered_map<std::wstring, Entry>& map)
 void Refresh(Repo* r) {
     ULONGLONG start = GetTickCount64();
     std::string out;
-    if (!RunGit(r->root, out)) return;
+    if (!RunGit(r->root, L"status --porcelain=v1 -z --ignored=traditional --untracked-files=normal", out)) return;
     std::unordered_map<std::wstring, Entry> entries;
     Parse(out, entries);
 
@@ -292,6 +291,11 @@ void SetGitPath(const std::wstring& path) {
 UINT RefreshMessage() {
     EnsureInit();
     return g_msgRefresh;
+}
+
+
+bool Run(const std::wstring& root, const wchar_t* args, std::string& out) {
+    return RunGit(root, args, out);
 }
 
 }

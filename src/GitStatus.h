@@ -11,4 +11,6 @@ namespace GitStatus {
     void RemoveListener(HWND hwnd);
     void SetGitPath(const std::wstring& path);
     UINT RefreshMessage();
+    // Runs git with the configured executable in root; out receives its standard output.
+    bool Run(const std::wstring& root, const wchar_t* args, std::string& out);
 }

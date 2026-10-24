@@ -286,7 +286,7 @@ void OnSettingsChanged(ViewTint* t) {
     t->cachedStyle = nullptr;
     if (old.git != t->settings.git || old.gitPath != t->settings.gitPath) ComputeRepo(t);
     if (old.systemLast != t->settings.systemLast || old.hideNames != t->settings.hideNames ||
-        old.hiddenNames != t->settings.hiddenNames || old.repoIcon != t->settings.repoIcon ||
+        old.hiddenNames != t->settings.hiddenNames || old.repoIcon != t->settings.repoIcon || old.repoBadge != t->settings.repoBadge ||
         old.folderIcons != t->settings.folderIcons || old.iconRoots != t->settings.iconRoots)
         RefreshView(t);
     InvalidateRect(t->list, nullptr, FALSE);

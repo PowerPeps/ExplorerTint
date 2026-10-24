@@ -26,6 +26,7 @@ struct Settings {
     std::vector<std::wstring> hiddenNames;  // lowercase
     bool ribbonTab = true;
     bool repoIcon = true;
+    std::wstring repoBadge = L"ring";                                  // lowercase: icon, ring, bar, combined
     std::vector<std::pair<std::wstring, std::wstring>> folderIcons;  // (lowercase name pattern, badge)
     std::vector<std::wstring> iconRoots;                              // lowercase, ending with '\'
 };
