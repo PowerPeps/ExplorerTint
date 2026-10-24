@@ -25,6 +25,9 @@ struct Settings {
     bool hideNames = true;
     std::vector<std::wstring> hiddenNames;  // lowercase
     bool ribbonTab = true;
+    bool repoIcon = true;
+    std::vector<std::pair<std::wstring, std::wstring>> folderIcons;  // (lowercase name pattern, badge)
+    std::vector<std::wstring> iconRoots;                              // lowercase, ending with '\'
 };
 
 Settings LoadSettings();
@@ -43,5 +46,8 @@ void RemoveSettingsListener(HWND hwnd);
 std::wstring FormatColor(const Rgba& c);
 std::wstring JoinNames(const std::vector<std::wstring>& names);
 std::vector<std::wstring> SplitNames(const std::wstring& list);
+std::wstring JoinIcons(const std::vector<std::pair<std::wstring, std::wstring>>& icons, const wchar_t* separator = L";");
+std::vector<std::pair<std::wstring, std::wstring>> SplitIcons(const std::wstring& list);
+std::vector<std::wstring> SplitRoots(const std::wstring& list);
 bool ParseColor(const std::wstring& s, Rgba& out);
 COLORREF Blend(const Rgba& over, COLORREF under);

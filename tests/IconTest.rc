@@ -1,0 +1,7 @@
+#include <winuser.h>
+#include "src/resource.h"
+
+IDR_REPO16  RCDATA "../res/repo16.png"
+IDR_REPO32  RCDATA "../res/repo32.png"
+IDR_REPO48  RCDATA "../res/repo48.png"
+IDR_REPO256 RCDATA "../res/repo256.png"

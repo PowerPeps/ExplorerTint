@@ -10,6 +10,7 @@ Cible : Windows 10 (build 19045), Explorer 64 bits, thème sombre. Les points ma
 | G2 | Rendre discrets les éléments « caché + système » et les placer en fin de liste | phase 2 |
 | G3 | Ordre personnalisé des dossiers via une colonne `#`, placée en première position | phase 3 |
 | G4 | Réglages dans un onglet du ruban d'Explorer (pas d'icône dans la zone de notification) | phase 4 |
+| G5 | Icônes de dossier : bleue pour un dépôt Git, badge selon le nom du dossier | phase 5 |
 
 Style retenu pour G1 (modifiable dans les réglages) :
 
@@ -32,7 +33,8 @@ explorer.exe
      ├─ Bho           suit la navigation de la fenêtre, attache un ViewTint à chaque vue
      ├─ ViewTint      sous-classe SHELLDLL_DefView, colore les lignes dans NM_CUSTOMDRAW
      ├─ GitStatus     cache des états par dépôt, git.exe en tâche de fond, surveillance disque
-     ├─ FolderHooks   GetAttributesOf / CompareIDs de CFSFolder (phases 2 et 3)
+     ├─ FolderHooks   GetAttributesOf / CompareIDs / IShellIcon de CFSFolder, miniatures (phases 2, 3, 5)
+     ├─ FolderIcons   construction et cache des icônes de dossier (phase 5)
      ├─ RibbonTab     onglet ExplorerTint injecté dans le ruban (phase 4)
      ├─ SettingsDialog fenêtre de réglages ouverte depuis le ruban
      └─ Settings      HKCU\Software\ExplorerTint, surveillée en continu
@@ -87,10 +89,13 @@ Clé `HKCU\Software\ExplorerTint` :
 | `HideNames` | DWORD | 1 | Active le traitement de `HiddenNames` (phase 2) |
 | `HiddenNames` | SZ | `.claude;.bin;.build;.git;.github;.ia;.idea` | Noms affichés comme cachés (phase 2) |
 | `RibbonTab` | DWORD | 1 | Onglet ExplorerTint dans le ruban (phase 4, nouvelles fenêtres) |
+| `RepoIcon` | DWORD | 1 | Icône bleue pour les dossiers de dépôt Git (phase 5) |
+| `FolderIcons` | SZ | `android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk="kk"` | Badge par nom de dossier (phase 5) |
+| `IconRoots` | SZ | `D:\` | Emplacements où les icônes de dossier s'appliquent ; vide : partout (phase 5) |
 
 Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`.
 
-Prise en compte immédiate : chaque processus Explorer surveille la clé (`RegNotifyChangeKeyValue` + `RegisterWaitForSingleObject`), relit les valeurs 100 ms après la dernière modification et publie un instantané partagé (`CurrentSettings()`). Les fenêtres abonnées reçoivent le message enregistré `ExplorerTint.SettingsChanged` : recalcul du dépôt si `Git` ou `GitPath` change, `IShellView::Refresh` si `SystemLast`, `HideNames` ou `HiddenNames` change, simple redessin sinon. Une modification faite dans une fenêtre, dans un autre processus Explorer ou directement dans le registre s'applique partout **[vérifié]**. `ClassicList` et `RibbonTab` ne valent que pour les fenêtres ouvertes ensuite.
+Prise en compte immédiate : chaque processus Explorer surveille la clé (`RegNotifyChangeKeyValue` + `RegisterWaitForSingleObject`), relit les valeurs 100 ms après la dernière modification et publie un instantané partagé (`CurrentSettings()`). Les fenêtres abonnées reçoivent le message enregistré `ExplorerTint.SettingsChanged` : recalcul du dépôt si `Git` ou `GitPath` change, `IShellView::Refresh` si `SystemLast`, `HideNames`, `HiddenNames` ou un réglage d'icône change, simple redessin sinon. Une modification faite dans une fenêtre, dans un autre processus Explorer ou directement dans le registre s'applique partout **[vérifié]**. `ClassicList` et `RibbonTab` ne valent que pour les fenêtres ouvertes ensuite.
 
 ## 4. Phases suivantes
 
@@ -130,6 +135,19 @@ Prise en compte immédiate : chaque processus Explorer surveille la clé (`RegNo
 - `SettingsDialog` : fenêtre modale (une seule à la fois) avec les cinq options, les huit couleurs (champ texte + aperçu sur damier, sélecteur Windows qui conserve l'opacité), la liste des noms cachés et le chemin de `git.exe`. Boutons Défauts, OK, Annuler, Appliquer ; une couleur invalide est signalée et rien n'est écrit. Thème sombre quand Explorer est sombre. Écrit toutes les valeurs de la clé, ce qui déclenche la prise en compte immédiate décrite en 3.5 **[vérifié]**.
 - Limite connue : la vérification a été faite avec l'interface en anglais ; les textes français n'ont pas été vus à l'écran.
 
+### Phase 5 — icônes de dossier (G5)
+
+- Règles, limitées aux emplacements `IconRoots` (défaut `D:\`) :
+  - dossier contenant `.git` (dossier ou fichier) → icône bleue, dessinée d'après les images fournies (`res/repo16.png`, `repo32`, `repo48`, `repo256` ; les autres tailles en sont réduites) ;
+  - nom correspondant à une entrée de `FolderIcons` (motif `PathMatchSpec`, insensible à la casse, première entrée gagnante) → badge en bas à droite, comme l'icône du dossier Polices ;
+  - les deux se combinent : un dossier `android` qui est un dépôt est bleu avec le badge Android.
+- Badges : nom intégré (`android`, `claude`, `desktop`, `fonts`, `git`, `hardware`, `web`, dessinés en vectoriel avec GDI+), texte entre guillemets (`"kk"`) ou mot inconnu, fichier image (`.png`, `.jpg`, `.bmp`, `.gif`) ou emplacement d'icône `fichier[,index]` (variables d'environnement acceptées). Un liseré sombre semi-transparent détache le badge du dossier et du fond.
+- Construction : base = icône de dossier du système (`SHGetStockIconInfo(SIID_FOLDER)`) ou base bleue, badge composé à chaque taille (16, 20, 24, 32, 40, 48, 64, 256), écrit en `.ico` dans `%LOCALAPPDATA%\ExplorerTint\icons\<empreinte>.ico`. L'empreinte couvre la version du dessin, le type de base, le badge et la date du fichier badge : un changement donne un nouveau fichier, donc pas d'image périmée dans le cache d'icônes du shell. Environ 12 ms par icône, une seule fois **[vérifié, journal]**.
+- Branchement : `IShellIcon::GetIconOf` de `CFSFolder` (table virtuelle commune, `windows.storage.dll`) renvoie l'index obtenu par `Shell_GetCachedImageIndexW` sur ce fichier. DefView passe par cet appel en vue Détails comme en grandes icônes **[vérifié]**.
+- Miniatures : en vue icônes, un dossier contenant des images affiche normalement un aperçu de son contenu, obtenu par `IThumbnailCache::GetThumbnail` (`thumbcache.dll`) et non par `GetUIObjectOf` **[vérifié, trace]**. Pour les dossiers concernés, l'appel renvoie `WTS_E_FAILEDEXTRACTION` et la vue garde l'icône, comme pour un dossier à icône `desktop.ini` **[vérifié]**.
+- Outil : `tests\bin\IconTest.exe <dossier> [badge …]` écrit toutes les variantes en `.ico` pour les inspecter hors d'Explorer.
+- Limites : un dossier qui devient dépôt (`git init`) ne change d'icône qu'après rafraîchissement (F5) ; l'arborescence du volet de navigation n'est pas rafraîchie quand les réglages changent.
+
 ## 5. Arborescence
 
 ```
@@ -138,7 +156,8 @@ ExplorerTint/
   ExplorerTint.def     exports COM
   ExplorerTint.rc      version, manifeste Common Controls v6, fenêtre de réglages
   src/                 code C++
-  tests/               RibbonTest (vérification du binaire du ruban, sonde UI Automation)
+  res/                 images de la base bleue des dépôts Git
+  tests/               RibbonTest (binaire du ruban, sonde UI Automation), IconTest (icônes de dossier)
   docs/                ce document
 ```
 

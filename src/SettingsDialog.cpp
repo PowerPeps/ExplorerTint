@@ -30,6 +30,7 @@ const Text kTexts[] = {
     { IDC_HIDENAMES + IDC_LABEL_OFFSET, L"Afficher les noms listés comme cachés", L"Show the listed names as hidden" },
     { IDC_CLASSIC + IDC_LABEL_OFFSET, L"Liste classique (nouvelles fenêtres)", L"Classic list (new windows)" },
     { IDC_RIBBON + IDC_LABEL_OFFSET, L"Onglet ExplorerTint dans le ruban (nouvelles fenêtres)", L"ExplorerTint ribbon tab (new windows)" },
+    { IDC_REPOICON + IDC_LABEL_OFFSET, L"Icône bleue pour les dossiers de dépôt Git", L"Blue icon for Git repository folders" },
     { IDC_COLORS_H, L"Couleurs", L"Colors" },
     { IDC_TEXT_H, L"Texte", L"Text" },
     { IDC_BACK_H, L"Fond", L"Background" },
@@ -39,8 +40,12 @@ const Text kTexts[] = {
     { IDC_SYSTEM_L, L"Système", L"System" },
     { IDC_NAMES_L, L"Noms affichés comme cachés (séparés par ;)", L"Names shown as hidden (separated by ;)" },
     { IDC_GITPATH_L, L"Chemin de git.exe (vide : recherche dans le PATH)", L"Path to git.exe (empty: search the PATH)" },
-    { IDC_NOTE, L"Couleurs au format #RRGGBB ou #RRGGBBAA (AA = opacité). Vide : rendu normal.",
-                L"Colors as #RRGGBB or #RRGGBBAA (AA = opacity). Empty: normal rendering." },
+    { IDC_FOLDERICONS_L, L"Icônes de dossier (nom=badge ; badge : nom intégré, \"texte\" ou fichier image/icône)",
+                         L"Folder icons (name=badge; badge: built-in name, \"text\" or image/icon file)" },
+    { IDC_ICONROOTS_L, L"Emplacements des icônes de dossier (séparés par ; vide : partout)",
+                       L"Where folder icons apply (separated by ; empty: everywhere)" },
+    { IDC_NOTE, L"Couleurs au format #RRGGBB ou #RRGGBBAA (AA = opacité). Vide : rendu normal. Badges intégrés : android, claude, desktop, fonts, git, hardware, web.",
+                L"Colors as #RRGGBB or #RRGGBBAA (AA = opacity). Empty: normal rendering. Built-in badges: android, claude, desktop, fonts, git, hardware, web." },
     { IDC_DEFAULTS, L"Par défaut", L"Defaults" },
     { IDOK, L"OK", L"OK" },
     { IDCANCEL, L"Annuler", L"Cancel" },
@@ -60,6 +65,7 @@ const Toggle kToggles[] = {
     { IDC_HIDENAMES, &Settings::hideNames },
     { IDC_CLASSIC, &Settings::classicList },
     { IDC_RIBBON, &Settings::ribbonTab },
+    { IDC_REPOICON, &Settings::repoIcon },
 };
 
 Rgba* ColorField(Settings& s, int index) {
@@ -100,6 +106,10 @@ void Fill(HWND dlg, const Settings& s) {
     for (auto& n : s.hiddenNames) names += (names.empty() ? L"" : L"; ") + n;
     SetDlgItemTextW(dlg, IDC_NAMES, names.c_str());
     SetDlgItemTextW(dlg, IDC_GITPATH, s.gitPath.c_str());
+    SetDlgItemTextW(dlg, IDC_FOLDERICONS, JoinIcons(s.folderIcons, L"; ").c_str());
+    std::wstring roots;
+    for (auto& r : s.iconRoots) roots += (roots.empty() ? L"" : L"; ") + r;
+    SetDlgItemTextW(dlg, IDC_ICONROOTS, roots.c_str());
 }
 
 bool Collect(HWND dlg, Settings& s) {
@@ -120,6 +130,8 @@ bool Collect(HWND dlg, Settings& s) {
     }
     s.hiddenNames = SplitNames(ItemText(dlg, IDC_NAMES));
     s.gitPath = ItemText(dlg, IDC_GITPATH);
+    s.folderIcons = SplitIcons(ItemText(dlg, IDC_FOLDERICONS));
+    s.iconRoots = SplitRoots(ItemText(dlg, IDC_ICONROOTS));
     return true;
 }
 
@@ -271,7 +283,7 @@ INT_PTR CALLBACK DialogProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), code = HIWORD(wp);
-        if (id >= IDC_GIT + IDC_LABEL_OFFSET && id <= IDC_RIBBON + IDC_LABEL_OFFSET && code == STN_CLICKED) {
+        if (id >= IDC_GIT + IDC_LABEL_OFFSET && id <= IDC_REPOICON + IDC_LABEL_OFFSET && code == STN_CLICKED) {
             int box = id - IDC_LABEL_OFFSET;
             CheckDlgButton(dlg, box, IsDlgButtonChecked(dlg, box) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED);
             return TRUE;

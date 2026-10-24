@@ -21,6 +21,13 @@ cl /nologo /MT /EHsc /O2 /W3 /std:c++17 /utf-8 /DUNICODE /D_UNICODE /Fobin\obj\ 
    RibbonTest.cpp ..\src\RibbonPatch.cpp ..\src\ImportPatch.cpp /Febin\RibbonTest.exe
 if errorlevel 1 ( echo [ERREUR] Compilation echouee & exit /b 1 )
 
+rc /nologo /i .. /fo bin\obj\IconTest.res IconTest.rc
+if errorlevel 1 ( echo [ERREUR] rc.exe & exit /b 1 )
+cl /nologo /MT /EHsc /O2 /W3 /std:c++17 /utf-8 /DUNICODE /D_UNICODE /Fobin\obj\ ^
+   IconTest.cpp ..\src\FolderIcons.cpp ..\src\Settings.cpp ..\src\Common.cpp bin\obj\IconTest.res ^
+   /Febin\IconTest.exe /link user32.lib gdi32.lib advapi32.lib shell32.lib ole32.lib
+if errorlevel 1 ( echo [ERREUR] Compilation echouee & exit /b 1 )
+
 echo.
-echo OK : %CD%\bin\RibbonTest.exe
+echo OK : %CD%\bin\RibbonTest.exe %CD%\bin\IconTest.exe
 exit /b 0

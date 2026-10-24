@@ -1,15 +1,19 @@
 #include "FolderHooks.h"
+#include "FolderIcons.h"
 #include "Order.h"
 #include <shlobj.h>
+#include <thumbcache.h>
 
 namespace {
 
 const int kCompareIDs = 7;
 const int kGetAttributesOf = 9;
+const int kGetIconOf = 3;
 const SFGAOF kHiddenFlags = SFGAO_HIDDEN | SFGAO_GHOSTED;
 
 typedef HRESULT (STDMETHODCALLTYPE* CompareIDs_t)(IShellFolder*, LPARAM, PCUIDLIST_RELATIVE, PCUIDLIST_RELATIVE);
 typedef HRESULT (STDMETHODCALLTYPE* GetAttributesOf_t)(IShellFolder*, UINT, PCUITEMID_CHILD_ARRAY, SFGAOF*);
+typedef HRESULT (STDMETHODCALLTYPE* GetIconOf_t)(IShellIcon*, PCUITEMID_CHILD, UINT, int*);
 
 struct Patched {
     void** vtable;
@@ -19,6 +23,14 @@ struct Patched {
 
 Patched s_patched[4];
 volatile LONG s_patchedCount;
+
+struct IconPatched {
+    void** vtable;
+    GetIconOf_t iconOf;
+};
+
+IconPatched s_icons[4];
+volatile LONG s_iconCount;
 INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
 thread_local bool t_inAttributes;
 
@@ -159,6 +171,60 @@ HRESULT STDMETHODCALLTYPE HookGetAttributesOf(IShellFolder* self, UINT cidl, PCU
     return hr;
 }
 
+const IconPatched* FindIcon(IShellIcon* self) {
+    void** vt = *(void***)self;
+    for (LONG i = 0; i < s_iconCount; i++)
+        if (s_icons[i].vtable == vt) return &s_icons[i];
+    return nullptr;
+}
+
+int CustomIcon(IShellFolder* folder, PCUITEMID_CHILD child) {
+    auto settings = CurrentSettings();
+    if (!settings->repoIcon && settings->folderIcons.empty()) return -1;
+    WIN32_FIND_DATAW fd;
+    if (FAILED(SHGetDataFromIDListW(folder, child, SHGDFIL_FINDDATA, &fd, sizeof(fd))) ||
+        !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+    return FolderIconIndex(*settings, PathOf(folder), fd);
+}
+
+HRESULT STDMETHODCALLTYPE HookGetIconOf(IShellIcon* self, PCUITEMID_CHILD child, UINT flags, int* index) {
+    const IconPatched* p = FindIcon(self);
+    if (!p) return E_FAIL;
+    IShellFolder* folder = nullptr;
+    if (index && IsChild(child) && SUCCEEDED(self->QueryInterface(IID_PPV_ARGS(&folder)))) {
+        int custom = CustomIcon(folder, child);
+        folder->Release();
+        if (custom >= 0) {
+            *index = custom;
+            return S_OK;
+        }
+    }
+    return p->iconOf(self, child, flags, index);
+}
+
+typedef HRESULT (STDMETHODCALLTYPE* GetThumbnail_t)(IThumbnailCache*, IShellItem*, UINT, WTS_FLAGS, ISharedBitmap**,
+                                                    WTS_CACHEFLAGS*, WTS_THUMBNAILID*);
+GetThumbnail_t s_getThumbnail;
+
+bool HasCustomIcon(IShellItem* item) {
+    PWSTR path = nullptr;
+    if (!item || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) return false;
+    bool custom = FolderIconIndex(*CurrentSettings(), path) >= 0;
+    CoTaskMemFree(path);
+    return custom;
+}
+
+// A folder with a custom icon gets no content preview, as with a desktop.ini icon: the view falls back to the icon.
+HRESULT STDMETHODCALLTYPE HookGetThumbnail(IThumbnailCache* self, IShellItem* item, UINT size, WTS_FLAGS flags,
+                                           ISharedBitmap** bitmap, WTS_CACHEFLAGS* cacheFlags, WTS_THUMBNAILID* id) {
+    if (HasCustomIcon(item)) {
+        if (bitmap) *bitmap = nullptr;
+        return WTS_E_FAILEDEXTRACTION;
+    }
+    return s_getThumbnail(self, item, size, flags, bitmap, cacheFlags, id);
+}
+
 bool PatchSlot(void** slot, void* hook) {
     DWORD old;
     if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &old)) return false;
@@ -175,6 +241,30 @@ std::wstring ModuleOf(void* address) {
         GetModuleFileNameW(mod, path, ARRAYSIZE(path));
     const wchar_t* slash = wcsrchr(path, L'\\');
     return Lower(slash ? slash + 1 : path);
+}
+
+void PatchIcon(IShellFolder* folder, const wchar_t* path) {
+    IShellIcon* icon = nullptr;
+    if (FAILED(folder->QueryInterface(IID_PPV_ARGS(&icon)))) {
+        Log(L"folders: %s has no IShellIcon", path);
+        return;
+    }
+    void** vt = *(void***)icon;
+    std::wstring module = ModuleOf(vt[kGetIconOf]);
+    if (FindIcon(icon)) {
+        Log(L"folders: %s shares an already patched IShellIcon vtable", path);
+    } else if (module != L"windows.storage.dll" || s_iconCount >= (LONG)ARRAYSIZE(s_icons)) {
+        Log(L"folders: %s IShellIcon vtable %p in %s left alone", path, vt, module.c_str());
+    } else {
+        IconPatched& p = s_icons[s_iconCount];
+        p.vtable = vt;
+        p.iconOf = (GetIconOf_t)vt[kGetIconOf];
+        MemoryBarrier();
+        InterlockedIncrement(&s_iconCount);
+        bool ok = PatchSlot(&vt[kGetIconOf], (void*)HookGetIconOf);
+        Log(L"folders: %s IShellIcon vtable %p patched (%s)", path, vt, ok ? L"ok" : L"failed");
+    }
+    icon->Release();
 }
 
 void PatchFolder(const wchar_t* path) {
@@ -202,7 +292,26 @@ void PatchFolder(const wchar_t* path) {
                   PatchSlot(&vt[kGetAttributesOf], (void*)HookGetAttributesOf);
         Log(L"folders: %s vtable %p in %s patched (%s)", path, vt, module.c_str(), ok ? L"ok" : L"failed");
     }
+    PatchIcon(folder, path);
     folder->Release();
+}
+
+void PatchThumbnails() {
+    IThumbnailCache* cache = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_LocalThumbnailCache, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&cache)))) {
+        Log(L"folders: thumbnail cache not created");
+        return;
+    }
+    void** vt = *(void***)cache;
+    std::wstring module = ModuleOf(vt[3]);
+    if (module != L"thumbcache.dll") {
+        Log(L"folders: IThumbnailCache vtable %p in %s left alone", vt, module.c_str());
+    } else {
+        s_getThumbnail = (GetThumbnail_t)vt[3];
+        bool ok = PatchSlot(&vt[3], (void*)HookGetThumbnail);
+        Log(L"folders: IThumbnailCache vtable %p patched (%s)", vt, ok ? L"ok" : L"failed");
+    }
+    cache->Release();
 }
 
 BOOL CALLBACK Install(PINIT_ONCE, void*, void**) {
@@ -212,6 +321,7 @@ BOOL CALLBACK Install(PINIT_ONCE, void*, void**) {
     wchar_t root[4] = { windows[0], L':', L'\\', 0 };
     PatchFolder(windows);
     PatchFolder(root);
+    PatchThumbnails();
     return TRUE;
 }
 

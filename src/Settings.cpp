@@ -4,6 +4,14 @@
 
 static const wchar_t kKey[] = L"Software\\ExplorerTint";
 static const wchar_t kDefaultHidden[] = L".claude;.bin;.build;.git;.github;.ia;.idea";
+static const wchar_t kDefaultIcons[] =
+    L"android=android;desktop=desktop;fonts=fonts;hardware=hardware;web=web;.git=git;.claude=claude;.kk=\"kk\"";
+static const wchar_t kDefaultRoots[] = L"D:\\";
+
+static std::wstring Trim(const std::wstring& s) {
+    size_t a = s.find_first_not_of(L" \t"), b = s.find_last_not_of(L" \t");
+    return a == std::wstring::npos ? L"" : s.substr(a, b - a + 1);
+}
 
 static bool ReadDword(HKEY k, const wchar_t* name, DWORD& out) {
     DWORD size = sizeof(out);
@@ -52,6 +60,43 @@ std::wstring JoinNames(const std::vector<std::wstring>& names) {
     return list;
 }
 
+// "name=badge;..." where a quoted badge may contain ';'.
+std::vector<std::pair<std::wstring, std::wstring>> SplitIcons(const std::wstring& list) {
+    std::vector<std::pair<std::wstring, std::wstring>> icons;
+    std::vector<std::wstring> entries(1);
+    bool quoted = false;
+    for (wchar_t c : list) {
+        if (c == L'"') quoted = !quoted;
+        if (c == L';' && !quoted) entries.emplace_back();
+        else entries.back() += c;
+    }
+    for (auto& e : entries) {
+        size_t eq = e.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        std::wstring name = Lower(Trim(e.substr(0, eq))), badge = Trim(e.substr(eq + 1));
+        if (name.empty() || badge.empty()) continue;
+        auto same = std::find_if(icons.begin(), icons.end(), [&](auto& p) { return p.first == name; });
+        if (same == icons.end()) icons.emplace_back(name, badge);
+    }
+    return icons;
+}
+
+std::wstring JoinIcons(const std::vector<std::pair<std::wstring, std::wstring>>& icons, const wchar_t* separator) {
+    std::wstring list;
+    for (auto& p : icons) list += (list.empty() ? L"" : separator) + p.first + L"=" + p.second;
+    return list;
+}
+
+std::vector<std::wstring> SplitRoots(const std::wstring& list) {
+    std::vector<std::wstring> roots = SplitNames(list);
+    for (auto& r : roots) {
+        std::replace(r.begin(), r.end(), L'/', L'\\');
+        if (r.size() == 1) r += L':';
+        if (r.back() != L'\\') r += L'\\';
+    }
+    return roots;
+}
+
 bool ParseColor(const std::wstring& s, Rgba& out) {
     out = Rgba();
     if (s.empty()) return true;
@@ -92,6 +137,8 @@ Settings DefaultSettings() {
     ParseColor(L"#9B49301F", s.ignored.back);
     ParseColor(L"#80808099", s.system.text);
     s.hiddenNames = SplitNames(kDefaultHidden);
+    s.folderIcons = SplitIcons(kDefaultIcons);
+    s.iconRoots = SplitRoots(kDefaultRoots);
     return s;
 }
 
@@ -116,6 +163,10 @@ Settings LoadSettings() {
     std::wstring hidden;
     if (ReadString(k, L"HiddenNames", hidden)) s.hiddenNames = SplitNames(hidden);
     if (ReadDword(k, L"RibbonTab", d)) s.ribbonTab = d != 0;
+    if (ReadDword(k, L"RepoIcon", d)) s.repoIcon = d != 0;
+    std::wstring list;
+    if (ReadString(k, L"FolderIcons", list)) s.folderIcons = SplitIcons(list);
+    if (ReadString(k, L"IconRoots", list)) s.iconRoots = SplitRoots(list);
     RegCloseKey(k);
     return s;
 }
@@ -147,6 +198,9 @@ bool SaveSettings(const Settings& s) {
     if (!e) e = WriteDword(k, L"HideNames", s.hideNames);
     if (!e) e = WriteString(k, L"HiddenNames", JoinNames(s.hiddenNames));
     if (!e) e = WriteDword(k, L"RibbonTab", s.ribbonTab);
+    if (!e) e = WriteDword(k, L"RepoIcon", s.repoIcon);
+    if (!e) e = WriteString(k, L"FolderIcons", JoinIcons(s.folderIcons));
+    if (!e) e = WriteString(k, L"IconRoots", JoinNames(s.iconRoots));
     RegCloseKey(k);
     if (e) Log(L"settings: save failed (%ld)", e);
     return e == ERROR_SUCCESS;
