@@ -22,6 +22,7 @@ struct Settings {
     StateStyle system;
     bool systemLast = true;
     std::vector<std::wstring> hiddenNames;  // lowercase
+    bool ribbonTab = true;
 };
 
 Settings LoadSettings();

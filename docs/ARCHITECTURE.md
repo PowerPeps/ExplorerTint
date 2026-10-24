@@ -82,6 +82,7 @@ Clé `HKCU\Software\ExplorerTint` :
 | `SystemText` / `SystemBack` | SZ | `#80808099` / vide | Couleurs des éléments système (phase 2) |
 | `SystemLast` | DWORD | 1 | Éléments système en fin de liste (phase 2) |
 | `HiddenNames` | SZ | `.claude;.bin;.build;.git;.github;.ia;.idea` | Noms affichés comme cachés (phase 2) |
+| `RibbonTab` | DWORD | 1 | Onglet ExplorerTint dans le ruban (phase 4) |
 
 Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relecture à chaque navigation ; l'onglet du ruban (phase 4) écrira dans cette clé.
 

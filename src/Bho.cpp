@@ -1,6 +1,7 @@
 #include "Bho.h"
 #include "ClassicList.h"
 #include "FolderHooks.h"
+#include "RibbonTab.h"
 #include "Settings.h"
 #include "ViewTint.h"
 #include <new>
@@ -93,6 +94,7 @@ public:
         Settings settings = LoadSettings();
         InstallClassicList(settings.classicList);
         InstallFolderHooks(settings);
+        InstallRibbonTab(settings.ribbonTab);
         HookViewCreation(true);
         m_hooked = true;
 

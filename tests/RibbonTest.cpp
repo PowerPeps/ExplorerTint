@@ -1,5 +1,6 @@
 // RibbonTest.exe --check [--file blob] [--out patched.bin]
 // RibbonTest.exe --show original|patched [--full] [--png prefix]
+// RibbonTest.exe --probe [--toggle] [--png prefix]
 #include "../src/RibbonPatch.h"
 #include "../src/ImportPatch.h"
 #include <ole2.h>
@@ -283,7 +284,7 @@ public:
     IFACEMETHODIMP OnDestroyUICommand(UINT32, UI_COMMANDTYPE, IUICommandHandler*) override { return S_OK; }
 } g_app;
 
-bool SavePng(HWND hwnd, const std::wstring& path) {
+bool SavePng(HWND hwnd, const std::wstring& path, bool fromScreen = false) {
     RECT rc;
     GetWindowRect(hwnd, &rc);
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
@@ -291,7 +292,7 @@ bool SavePng(HWND hwnd, const std::wstring& path) {
     HDC dc = CreateCompatibleDC(screen);
     HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
     HGDIOBJ old = SelectObject(dc, bmp);
-    if (!PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)) BitBlt(dc, 0, 0, w, h, screen, rc.left, rc.top, SRCCOPY);
+    if (fromScreen || !PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)) BitBlt(dc, 0, 0, w, h, screen, rc.left, rc.top, SRCCOPY);
     SelectObject(dc, old);
     static const CLSID png = { 0x557cf406, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } };
     bool ok;
@@ -480,6 +481,102 @@ int Show(bool patched, bool full, const std::wstring& png) {
     return g_failures;
 }
 
+int ReadToggle(IUIAutomationElement* e) {
+    IUIAutomationTogglePattern* t = nullptr;
+    if (FAILED(e->GetCurrentPatternAs(UIA_TogglePatternId, IID_PPV_ARGS(&t))) || !t) return -1;
+    ToggleState state = ToggleState_Indeterminate;
+    t->get_CurrentToggleState(&state);
+    t->Release();
+    return state;
+}
+
+bool Toggle(IUIAutomationElement* e) {
+    IUIAutomationTogglePattern* t = nullptr;
+    if (SUCCEEDED(e->GetCurrentPatternAs(UIA_TogglePatternId, IID_PPV_ARGS(&t))) && t) {
+        HRESULT hr = t->Toggle();
+        t->Release();
+        if (SUCCEEDED(hr)) return true;
+    }
+    IUIAutomationLegacyIAccessiblePattern* acc = nullptr;
+    if (SUCCEEDED(e->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId, IID_PPV_ARGS(&acc))) && acc) {
+        HRESULT hr = acc->DoDefaultAction();
+        acc->Release();
+        return SUCCEEDED(hr);
+    }
+    return false;
+}
+
+// Checks every open Explorer window from outside its process.
+int Probe(const std::wstring& png, bool toggle) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    Gdiplus::GdiplusStartupInput gsi;
+    ULONG_PTR gdip = 0;
+    Gdiplus::GdiplusStartup(&gdip, &gsi, nullptr);
+    IUIAutomation* uia = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia)))) {
+        Report(false, "create UI Automation client");
+        return g_failures;
+    }
+    std::vector<HWND> windows;
+    for (HWND hwnd = nullptr; (hwnd = FindWindowExW(nullptr, hwnd, L"CabinetWClass", nullptr)) != nullptr;)
+        windows.push_back(hwnd);
+    int index = 0;
+    for (HWND hwnd : windows) {
+        index++;
+        wchar_t title[260] = L"";
+        GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        printf("window %d \"%ls\" pid %lu\n", index, title, pid);
+        IUIAutomationElement* root = nullptr;
+        if (FAILED(uia->ElementFromHandle(hwnd, &root)) || !root) { Report(false, "window element"); continue; }
+        wchar_t suffix[16];
+        swprintf_s(suffix, L"-%d.png", index);
+        IUIAutomationElement* tab = FindByName(uia, root, kOwn[0].label);
+        Report(tab != nullptr, "tab ExplorerTint present");
+        if (tab) {
+            SetForegroundWindow(hwnd);
+            Sleep(300);
+            ActivateTab(tab);
+            Sleep(800);
+            bool all = true;
+            for (int i = 2; i < ARRAYSIZE(kOwn); i++) {
+                IUIAutomationElement* item = FindByName(uia, root, kOwn[i].label);
+                if (!item) { printf("  control \"%ls\" missing\n", kOwn[i].label); all = false; continue; }
+                item->Release();
+            }
+            Report(all, "group controls present after selecting the tab");
+            SavePng(hwnd, png + suffix, true);
+            IUIAutomationElement* box = toggle ? FindByName(uia, root, kOwn[2].label) : nullptr;
+            if (box) {
+                int before = ReadToggle(box);
+                bool ok = Toggle(box);
+                box->Release();
+                Sleep(500);
+                ActivateTab(tab);
+                Sleep(800);
+                int after = -1;
+                if ((box = FindByName(uia, root, kOwn[2].label)) != nullptr) {
+                    after = ReadToggle(box);
+                    box->Release();
+                }
+                printf("  toggle \"%ls\": %d -> %d\n", kOwn[2].label, before, after);
+                Report(ok && before >= 0 && after >= 0 && before != after, "checkbox toggles");
+                PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+            }
+            tab->Release();
+        } else {
+            SavePng(hwnd, png + suffix);
+        }
+        root->Release();
+    }
+    Report(index > 0, "at least one Explorer window");
+    uia->Release();
+    Gdiplus::GdiplusShutdown(gdip);
+    printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");
+    return g_failures;
+}
+
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -497,11 +594,18 @@ int wmain(int argc, wchar_t** argv) {
         else if (!_wcsicmp(argv[i], L"--full")) full = true;
     }
     if (!_wcsicmp(mode, L"--check")) return Check(file, out);
+    if (!_wcsicmp(mode, L"--probe")) {
+        bool toggle = false;
+        for (int i = 2; i < argc; i++)
+            if (!_wcsicmp(argv[i], L"--toggle")) toggle = true;
+        return Probe(png + L"-explorer", toggle);
+    }
     if (!_wcsicmp(mode, L"--show")) {
         bool patched = argc > 2 && !_wcsicmp(argv[2], L"patched");
         return Show(patched, full, png + (patched ? L"-patched" : L"-original"));
     }
     printf("usage: RibbonTest --check [--file blob] [--out patched.bin]\n"
-           "       RibbonTest --show original|patched [--full] [--png prefix]\n");
+           "       RibbonTest --show original|patched [--full] [--png prefix]\n"
+           "       RibbonTest --probe [--toggle] [--png prefix]\n");
     return 2;
 }

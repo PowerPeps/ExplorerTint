@@ -93,6 +93,7 @@ Settings LoadSettings() {
     ReadColor(k, L"SystemBack", s.system.back);
     if (ReadDword(k, L"SystemLast", d)) s.systemLast = d != 0;
     ReadString(k, L"HiddenNames", hidden);
+    if (ReadDword(k, L"RibbonTab", d)) s.ribbonTab = d != 0;
     RegCloseKey(k);
     s.hiddenNames = SplitNames(hidden);
     return s;
