@@ -1,5 +1,6 @@
 #include "FolderIcons.h"
 #include "RepoInfo.h"
+#include "VectorImage.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -300,7 +301,7 @@ void Text(Graphics& g, const std::wstring& text, const Color& color = Color(0x00
 
 bool IsRaster(const std::wstring& file) {
     const wchar_t* ext = PathFindExtensionW(file.c_str());
-    for (auto e : { L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff" })
+    for (auto e : { L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".tif", L".tiff", L".webp" })
         if (!_wcsicmp(ext, e)) return true;
     return false;
 }
@@ -329,23 +330,6 @@ struct Raster {
     int w = 0, h = 0;
     std::vector<UINT32> px;  // ARGB, top-down
 };
-
-bool FromImage(Bitmap& bmp, Raster& out) {
-    out.w = (int)bmp.GetWidth();
-    out.h = (int)bmp.GetHeight();
-    if (out.w <= 0 || out.h <= 0) return false;
-    out.px.assign((size_t)out.w * out.h, 0);
-    BitmapData bd = {};
-    bd.Width = out.w;
-    bd.Height = out.h;
-    bd.Stride = out.w * 4;
-    bd.PixelFormat = PixelFormat32bppARGB;
-    bd.Scan0 = out.px.data();
-    Rect rc(0, 0, out.w, out.h);
-    if (bmp.LockBits(&rc, ImageLockModeRead | ImageLockModeUserInputBuf, PixelFormat32bppARGB, &bd) != Ok) return false;
-    bmp.UnlockBits(&bd);
-    return true;
-}
 
 bool FromHicon(HICON icon, Raster& out) {
     Pixels p;
@@ -431,9 +415,11 @@ void DrawFitted(Graphics& g, Raster& r, int pixels) {
 
 bool DrawFile(Graphics& g, const std::wstring& file, int index, int pixels) {
     Raster r;
-    if (IsRaster(file)) {
-        Bitmap image(file.c_str());
-        if (image.GetLastStatus() != Ok || !FromImage(image, r)) return false;
+    if (IsVector(file)) {
+        r.w = r.h = pixels;
+        if (!RenderVector(file, pixels, r.px)) return false;
+    } else if (IsRaster(file)) {
+        if (!LoadRaster(file, r.w, r.h, r.px)) return false;
     } else if (!_wcsicmp(PathFindExtensionW(file.c_str()), L".ico")) {
         if (!LoadIco(file, pixels, r)) return false;
     } else {

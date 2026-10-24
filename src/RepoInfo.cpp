@@ -14,7 +14,7 @@ const UINT64 kMaxIconBytes = 2 * 1024 * 1024;
 const UINT32 kOtherColor = 0x8B949E;
 const size_t kMaxLanguages = 6;
 const unsigned short kUncounted = 65535;
-const char kCacheHeader[] = "ExplorerTint repos 3\n";  // bumped when the statistics change
+const char kCacheHeader[] = "ExplorerTint repos 4\n";  // bumped when the statistics change
 
 struct Entry {
     std::wstring commit;
@@ -234,17 +234,318 @@ bool IconShaped(const std::wstring& file) {
     return lo >= 16 && hi * 4 <= lo * 5;
 }
 
-int IconScore(const std::wstring& path, UINT64 size) {
+struct TreeFile {
+    std::wstring path;  // '/' separated, as in the tree
+    UINT64 size;
+};
+
+std::wstring WorkFile(const std::wstring& repo, std::wstring path) {
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    return repo + (repo.back() == L'\\' ? L"" : L"\\") + path;
+}
+
+std::wstring DirOf(const std::wstring& path) {
+    size_t slash = path.find_last_of(L'/');
+    return slash == std::wstring::npos ? L"" : path.substr(0, slash + 1);
+}
+
+std::wstring NameOf(const std::wstring& path) {
+    return path.substr(DirOf(path).size());
+}
+
+std::wstring ExtOf(const std::wstring& path) {
+    std::wstring name = NameOf(path);
+    size_t dot = name.find_last_of(L'.');
+    return dot == std::wstring::npos ? L"" : Lower(name.substr(dot));
+}
+
+int Depth(const std::wstring& path) {
+    return (int)std::count(path.begin(), path.end(), L'/');
+}
+
+// A reference written in a file of the tree directory dir ("../assets/icon.ico", "res\\app.ico"), resolved and
+// normalised; empty when it leaves the repository.
+std::wstring JoinTree(const std::wstring& dir, std::wstring ref) {
+    std::replace(ref.begin(), ref.end(), L'\\', L'/');
+    std::wstring all = !ref.empty() && ref[0] == L'/' ? ref.substr(1) : dir + ref;
+    std::vector<std::wstring> parts;
+    for (size_t pos = 0; pos <= all.size();) {
+        size_t end = all.find(L'/', pos);
+        if (end == std::wstring::npos) end = all.size();
+        std::wstring part = all.substr(pos, end - pos);
+        pos = end + 1;
+        if (part == L"..") {
+            if (parts.empty()) return L"";
+            parts.pop_back();
+        } else if (!part.empty() && part != L".") {
+            parts.push_back(part);
+        }
+    }
+    std::wstring out;
+    for (auto& p : parts) out += (out.empty() ? L"" : L"/") + p;
+    return out;
+}
+
+std::vector<std::string> Lines(const std::string& text, size_t max = SIZE_MAX) {
+    std::vector<std::string> lines;
+    for (size_t pos = 0; pos < text.size() && lines.size() < max;) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(std::move(line));
+        pos = end + 1;
+    }
+    return lines;
+}
+
+std::string Unquote(std::string s) {
+    size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+    s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+    return s;
+}
+
+// The project's icon: first one its own files declare (Windows resource script, Android manifest, web manifest,
+// installer script, web page, top of the README), else the best named image file.
+class IconFinder {
+public:
+    IconFinder(const std::wstring& repo, const std::vector<TreeFile>& files) : m_repo(repo), m_files(files) {
+        for (auto& f : files) m_index[Lower(f.path)] = &f;
+        std::wstring root = repo.back() == L'\\' ? repo.substr(0, repo.size() - 1) : repo;
+        m_name = Lower(root.substr(root.find_last_of(L'\\') + 1));
+    }
+
+    std::wstring Find() {
+        typedef std::wstring (IconFinder::*Reader)(const TreeFile&);
+        struct Source {
+            bool (*match)(const std::wstring& name, const std::wstring& ext);
+            Reader read;
+        };
+        static const Source sources[] = {
+            { [](const std::wstring&, const std::wstring& ext) { return ext == L".rc"; }, &IconFinder::FromRc },
+            { [](const std::wstring& name, const std::wstring&) { return name == L"androidmanifest.xml"; }, &IconFinder::FromAndroid },
+            { [](const std::wstring& name, const std::wstring&) { return name == L"manifest.json" || name == L"site.webmanifest" || name == L"manifest.webmanifest"; }, &IconFinder::FromWebManifest },
+            { [](const std::wstring&, const std::wstring& ext) { return ext == L".iss" || ext == L".nsi"; }, &IconFinder::FromInstaller },
+            { [](const std::wstring& name, const std::wstring&) { return name == L"index.html"; }, &IconFinder::FromHtml },
+            { [](const std::wstring& name, const std::wstring&) { return name == L"readme.md"; }, &IconFinder::FromReadme },
+        };
+        for (auto& source : sources) {
+            std::vector<const TreeFile*> found;
+            for (auto& f : m_files) {
+                std::wstring lower = Lower(f.path);
+                if (source.match(NameOf(lower), ExtOf(lower)) && lower.find(L"test") == std::wstring::npos) found.push_back(&f);
+            }
+            std::sort(found.begin(), found.end(), [](const TreeFile* a, const TreeFile* b) {
+                int da = Depth(a->path), db = Depth(b->path);
+                return da != db ? da < db : a->path < b->path;
+            });
+            for (auto f : found) {
+                std::wstring icon = (this->*source.read)(*f);
+                if (!icon.empty()) return icon;
+            }
+        }
+        return ByName();
+    }
+
+private:
+    const std::wstring& m_repo;
+    const std::vector<TreeFile>& m_files;
+    std::map<std::wstring, const TreeFile*> m_index;  // key: lowercase path
+    std::wstring m_name;                              // lowercase repository folder name
+
+    std::string Text(const TreeFile& f, UINT64 max = 1024 * 1024) {
+        return f.size <= max ? ReadText(WorkFile(m_repo, f.path)) : "";
+    }
+
+    // The working file of an image in the tree, or empty.
+    std::wstring Usable(const std::wstring& path) {
+        if (path.empty()) return L"";
+        auto it = m_index.find(Lower(path));
+        if (it == m_index.end() || it->second->size == 0 || it->second->size > kMaxIconBytes) return L"";
+        std::wstring ext = ExtOf(path);
+        static const wchar_t* const exts[] = { L".ico", L".png", L".svg", L".xml", L".jpg", L".jpeg", L".bmp", L".gif", L".webp" };
+        if (std::none_of(std::begin(exts), std::end(exts), [&](const wchar_t* e) { return ext == e; })) return L"";
+        std::wstring file = WorkFile(m_repo, it->second->path);
+        return GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES && IconShaped(file) ? file : L"";
+    }
+
+    // "<id> ICON [options] "file"": the first icon of the script is the executable's.
+    std::wstring FromRc(const TreeFile& f) {
+        static const std::regex icon(R"re(^\s*\w+\s+ICON\b[^"]*"([^"]+)")re", std::regex::icase);
+        for (auto& line : Lines(Text(f))) {
+            std::smatch m;
+            if (!std::regex_search(line, m, icon)) continue;
+            std::wstring ref = Widen(m[1]);
+            for (size_t p; (p = ref.find(L"\\\\")) != std::wstring::npos;) ref.erase(p, 1);
+            return Usable(JoinTree(DirOf(f.path), ref));
+        }
+        return L"";
+    }
+
+    std::wstring FromAndroid(const TreeFile& f) {
+        static const std::regex icon(R"re(android:icon\s*=\s*"@(?:mipmap|drawable)/([\w.]+)")re");
+        std::smatch m;
+        std::string text = Text(f);
+        return std::regex_search(text, m, icon) ? AndroidResource(DirOf(f.path) + L"res/", Widen(m[1])) : L"";
+    }
+
+    // An adaptive icon (mipmap-anydpi), else the densest bitmap, else any drawable of that name.
+    std::wstring AndroidResource(const std::wstring& res, const std::wstring& name) {
+        static const wchar_t* const densities[] = { L"xxxhdpi", L"xxhdpi", L"xhdpi", L"hdpi", L"mdpi" };
+        std::wstring lowerRes = Lower(res), lowerName = Lower(name), best;
+        int bestRank = INT_MAX;
+        for (auto& f : m_files) {
+            std::wstring lower = Lower(f.path);
+            if (lower.compare(0, lowerRes.size(), lowerRes) != 0 || Depth(lower) != Depth(lowerRes) + 1) continue;
+            std::wstring dir = lower.substr(lowerRes.size(), lower.find_last_of(L'/') - lowerRes.size()), file = NameOf(lower);
+            std::wstring ext = ExtOf(file);
+            if ((dir.compare(0, 6, L"mipmap") != 0 && dir.compare(0, 8, L"drawable") != 0) || file != lowerName + ext) continue;
+            int rank;
+            if (ext == L".xml") rank = dir.find(L"anydpi") != std::wstring::npos ? 0 : 20;
+            else if (ext == L".png" || ext == L".webp") {
+                rank = 10;
+                for (int i = 0; i < ARRAYSIZE(densities); i++)
+                    if (dir.find(densities[i]) != std::wstring::npos) { rank = 1 + i; break; }
+            } else continue;
+            if (rank < bestRank && !Usable(f.path).empty()) bestRank = rank, best = f.path;
+        }
+        return Usable(best);
+    }
+
+    // A path of a web page or manifest: relative to it, or from the site root ("/icon.png", tried in public/ too).
+    std::wstring WebRef(const std::wstring& dir, std::string ref) {
+        if (ref.find("://") != std::string::npos || ref.compare(0, 5, "data:") == 0 || ref.compare(0, 2, "//") == 0) return L"";
+        ref = ref.substr(0, ref.find_first_of("?#"));
+        std::wstring w = Widen(ref);
+        if (!w.empty() && w[0] == L'/') {
+            for (auto& base : { std::wstring(L"public/"), std::wstring(), dir }) {
+                std::wstring icon = Usable(JoinTree(base, w.substr(1)));
+                if (!icon.empty()) return icon;
+            }
+            return L"";
+        }
+        return Usable(JoinTree(dir, w));
+    }
+
+    // "icons": { "128": "icon128.png" } (browser extension) or [ { "src": ..., "sizes": "512x512" } ] (web app).
+    std::wstring FromWebManifest(const TreeFile& f) {
+        static const std::regex object(R"re("icons"\s*:\s*\{([^}]*)\})re"), pair(R"re("(\d+)"\s*:\s*"([^"]+)")re");
+        static const std::regex list(R"re("icons"\s*:\s*\[([^\]]*)\])re"), item(R"re(\{[^}]*\})re");
+        static const std::regex src(R"re("src"\s*:\s*"([^"]+)")re"), sizes(R"re("sizes"\s*:\s*"(\d+))re");
+        std::string text = Text(f), best;
+        int bestSize = -1;
+        std::smatch m;
+        if (std::regex_search(text, m, object)) {
+            std::string body = m[1];
+            for (std::sregex_iterator it(body.begin(), body.end(), pair), end; it != end; ++it)
+                if (atoi((*it)[1].str().c_str()) > bestSize) bestSize = atoi((*it)[1].str().c_str()), best = (*it)[2];
+        } else if (std::regex_search(text, m, list)) {
+            std::string body = m[1];
+            for (std::sregex_iterator it(body.begin(), body.end(), item), end; it != end; ++it) {
+                std::string obj = (*it)[0];
+                std::smatch s, z;
+                if (!std::regex_search(obj, s, src)) continue;
+                int size = std::regex_search(obj, z, sizes) ? atoi(z[1].str().c_str()) : 0;
+                if (size > bestSize) bestSize = size, best = s[1];
+            }
+        }
+        return best.empty() ? L"" : WebRef(DirOf(f.path), best);
+    }
+
+    std::wstring FromInstaller(const TreeFile& f) {
+        static const std::regex setup(R"(^\s*SetupIconFile\s*=\s*(.+)$)", std::regex::icase);
+        static const std::regex uninstall(R"(^\s*UninstallDisplayIcon\s*=\s*(.+)$)", std::regex::icase);
+        static const std::regex nsis(R"re(^\s*(?:!define\s+MUI_ICON|Icon)\s+"([^"]+)")re", std::regex::icase);
+        std::wstring dir = DirOf(f.path);
+        for (auto& line : Lines(Text(f))) {
+            std::smatch m;
+            if ((std::regex_search(line, m, setup) || std::regex_search(line, m, nsis)) && m[1].str().find_first_of("{$") == std::string::npos) {
+                std::wstring icon = Usable(JoinTree(dir, Widen(Unquote(m[1]))));
+                if (!icon.empty()) return icon;
+            } else if (std::regex_search(line, m, uninstall)) {
+                // "{app}\share.ico": the installed copy of a file shipped from the script's folder.
+                std::wstring value = Widen(Unquote(m[1]));
+                value = value.substr(0, value.find(L','));
+                std::wstring name = value.substr(value.find_last_of(L"\\/}") + 1);
+                if (ExtOf(name) != L".exe") {
+                    std::wstring icon = Usable(JoinTree(dir, name));
+                    if (!icon.empty()) return icon;
+                }
+            }
+        }
+        return L"";
+    }
+
+    std::wstring FromHtml(const TreeFile& f) {
+        static const std::regex link(R"(<link\b[^>]*>)", std::regex::icase);
+        static const std::regex rel(R"re(\brel\s*=\s*["']([^"']*)["'])re", std::regex::icase);
+        static const std::regex href(R"re(\bhref\s*=\s*["']([^"']+)["'])re", std::regex::icase);
+        std::string text = Text(f, 8 * 1024 * 1024);
+        for (std::sregex_iterator it(text.begin(), text.end(), link), end; it != end; ++it) {
+            std::string tag = (*it)[0];
+            std::smatch r, h;
+            if (!std::regex_search(tag, r, rel) || Lower(Widen(r[1])).find(L"icon") == std::wstring::npos ||
+                !std::regex_search(tag, h, href))
+                continue;
+            std::wstring icon = WebRef(DirOf(f.path), h[1]);
+            if (!icon.empty()) return icon;
+        }
+        return L"";
+    }
+
+    // The first image of the README's first lines, when it is a file of the repository (a GitHub address included).
+    std::wstring FromReadme(const TreeFile& f) {
+        static const std::regex image(R"re(<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']|!\[[^\]]*\]\(\s*<?([^)\s>]+))re", std::regex::icase);
+        if (Depth(f.path) != 0) return L"";
+        for (auto& line : Lines(Text(f), 20)) {
+            std::smatch m;
+            if (!std::regex_search(line, m, image)) continue;
+            std::wstring ref = Widen(m[1].matched ? m[1].str() : m[2].str());
+            ref = ref.substr(0, ref.find_first_of(L"?#"));
+            if (ExtOf(ref) == L".svg") return L"";
+            size_t scheme = ref.find(L"://");
+            if (scheme == std::wstring::npos) return Usable(JoinTree(L"", ref));
+            if (Lower(ref).find(L"github") == std::wstring::npos) return L"";
+            // https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>: the longest tail that is in the tree.
+            std::wstring rest = ref.substr(scheme + 3);
+            for (size_t slash = rest.find(L'/'); slash != std::wstring::npos; slash = rest.find(L'/', slash + 1)) {
+                std::wstring icon = Usable(rest.substr(slash + 1));
+                if (!icon.empty()) return icon;
+            }
+            return L"";
+        }
+        return L"";
+    }
+
+    std::wstring ByName() {
+        int bestScore = 4;
+        std::wstring best;
+        for (auto& f : m_files) {
+            int score = IconScore(f.path, f.size, m_name);
+            if (score > bestScore && !Usable(f.path).empty()) bestScore = score, best = f.path;
+        }
+        return Usable(best);
+    }
+
+    static int IconScore(const std::wstring& path, UINT64 size, const std::wstring& repoName);
+};
+
+std::wstring FindIcon(const std::wstring& repo, const std::vector<TreeFile>& files) {
+    return IconFinder(repo, files).Find();
+}
+
+int IconFinder::IconScore(const std::wstring& path, UINT64 size, const std::wstring& repoName) {
     std::wstring lower = Lower(path);
     size_t slash = lower.find_last_of(L'/');
     std::wstring name = lower.substr(slash == std::wstring::npos ? 0 : slash + 1);
     size_t dot = name.find_last_of(L'.');
     if (dot == std::wstring::npos || size == 0 || size > kMaxIconBytes) return 0;
     std::wstring stem = name.substr(0, dot), ext = name.substr(dot);
-    if (ext != L".ico" && ext != L".png") return 0;
-    int score = ext == L".ico" ? 3 : 1;
+    if (ext != L".ico" && ext != L".png" && ext != L".svg") return 0;
+    int score = ext == L".png" ? 1 : 3;
     if (stem == L"icon" || stem == L"app" || stem == L"appicon" || stem == L"favicon" || stem == L"logo" ||
-        stem == L"ic_launcher")
+        stem == L"ic_launcher" || stem == repoName)
         score += 10;
     else if (stem.find(L"icon") != std::wstring::npos || stem.find(L"logo") != std::wstring::npos)
         score += 5;
@@ -270,8 +571,7 @@ RepoInfo Compute(const std::wstring& repo) {
     std::vector<UINT64> bytes(ARRAYSIZE(kLinguistLanguages));
     std::vector<Pending> ambiguous;
     const Patterns& excluded = Excluded();
-    int bestIcon = 4;
-    std::wstring icon;
+    std::vector<TreeFile> files;
 
     // "<mode> <type> <object> <size>\t<path>\0"
     for (size_t pos = 0; pos < out.size();) {
@@ -287,15 +587,8 @@ RepoInfo Compute(const std::wstring& repo) {
         size_t slash = path.find_last_of(L'/');
         std::wstring name = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
 
-        std::wstring file = repo + (repo.back() == L'\\' ? L"" : L"\\") + path;
-        std::replace(file.begin(), file.end(), L'/', L'\\');
-        int score = IconScore(path, size);
-        if (score > bestIcon) {
-            if (GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES && IconShaped(file)) {
-                bestIcon = score;
-                icon = file;
-            }
-        }
+        std::wstring file = WorkFile(repo, path);
+        if (!excluded.Match(path)) files.push_back({ path, size });
 
         std::vector<int> langs = LanguagesOf(name);
         if (langs.empty() || (langs.size() == 1 && langs[0] == kUncounted) || excluded.Match(path) || IsBinary(file))
@@ -332,7 +625,7 @@ RepoInfo Compute(const std::wstring& repo) {
         }
     }
     if (other > 0) info.languages.push_back({ L"Other", kOtherColor, other });
-    info.icon = icon;
+    info.icon = FindIcon(repo, files);
     return info;
 }
 
