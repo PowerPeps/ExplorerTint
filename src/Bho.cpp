@@ -1,5 +1,6 @@
 #include "Bho.h"
 #include "ClassicList.h"
+#include "FolderHooks.h"
 #include "Settings.h"
 #include "ViewTint.h"
 #include <new>
@@ -89,7 +90,9 @@ public:
             sp->QueryService(SID_SWebBrowserApp, IID_PPV_ARGS(&m_web));
             sp->Release();
         }
-        InstallClassicList(LoadSettings().classicList);
+        Settings settings = LoadSettings();
+        InstallClassicList(settings.classicList);
+        InstallFolderHooks(settings);
         HookViewCreation(true);
         m_hooked = true;
 

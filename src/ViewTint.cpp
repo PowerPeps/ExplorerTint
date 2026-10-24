@@ -1,4 +1,5 @@
 #include "ViewTint.h"
+#include "FolderHooks.h"
 #include "GitStatus.h"
 #include "ImportPatch.h"
 #include "Settings.h"
@@ -51,29 +52,36 @@ std::wstring FolderPath(IFolderView* fv) {
     return path;
 }
 
-bool ItemName(ViewTint* t, int index, std::wstring& name) {
-    PITEMID_CHILD child = nullptr;
-    if (!t->folderView || !t->folder || FAILED(t->folderView->Item(index, &child))) return false;
+bool ItemName(ViewTint* t, PCUITEMID_CHILD child, std::wstring& name) {
     STRRET sr;
     wchar_t buf[MAX_PATH];
-    bool ok = SUCCEEDED(t->folder->GetDisplayNameOf(child, SHGDN_INFOLDER | SHGDN_FORPARSING, &sr)) &&
-              SUCCEEDED(StrRetToBufW(&sr, child, buf, ARRAYSIZE(buf)));
-    CoTaskMemFree(child);
-    if (ok) name = buf;
-    return ok;
+    if (FAILED(t->folder->GetDisplayNameOf(child, SHGDN_INFOLDER | SHGDN_FORPARSING, &sr)) ||
+        FAILED(StrRetToBufW(&sr, child, buf, ARRAYSIZE(buf))))
+        return false;
+    name = buf;
+    return true;
+}
+
+const StateStyle* GitStyle(ViewTint* t, PCUITEMID_CHILD child) {
+    std::wstring name;
+    if (t->repo.empty() || !ItemName(t, child, name)) return nullptr;
+    switch (GitStatus::Query(t->repo, t->prefix + name)) {
+    case GitState::Staged:    return &t->settings.staged;
+    case GitState::Untracked: return &t->settings.untracked;
+    case GitState::Ignored:   return &t->settings.ignored;
+    default:                  return nullptr;
+    }
 }
 
 const StateStyle* StyleFor(ViewTint* t, int index) {
     if (index == t->cachedIndex) return t->cachedStyle;
     const StateStyle* style = nullptr;
-    std::wstring name;
-    if (!t->repo.empty() && ItemName(t, index, name)) {
-        switch (GitStatus::Query(t->repo, t->prefix + name)) {
-        case GitState::Staged:    style = &t->settings.staged; break;
-        case GitState::Untracked: style = &t->settings.untracked; break;
-        case GitState::Ignored:   style = &t->settings.ignored; break;
-        default: break;
-        }
+    PITEMID_CHILD child = nullptr;
+    if (t->folderView && t->folder && SUCCEEDED(t->folderView->Item(index, &child))) {
+        DWORD attrs;
+        if (ItemAttributes(t->folder, child, attrs) && IsSystemItem(attrs)) style = &t->settings.system;
+        else style = GitStyle(t, child);
+        CoTaskMemFree(child);
     }
     t->cachedIndex = index;
     t->cachedStyle = style;
@@ -118,8 +126,9 @@ LRESULT OnCustomDraw(ViewTint* t, NMLVCUSTOMDRAW* cd, LRESULT r) {
         if (!(cd->nmcd.uItemState & CDIS_SELECTED)) cd->clrTextBk = bg;
     }
 
+    bool wholeRow = st == &t->settings.system;
     bool nameColumn = !sub || cd->iSubItem == 0;
-    if (st && st->text.set && nameColumn) cd->clrText = Blend(st->text, bg);
+    if (st && st->text.set && (nameColumn || wholeRow)) cd->clrText = Blend(st->text, bg);
     else if (sub || (t->dark && !IsLight(cd->clrText))) cd->clrText = t->textColor;
 
     r |= CDRF_NEWFONT;
@@ -298,6 +307,7 @@ LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
         return 0;
     } else if (msg == WM_NCDESTROY) {
         GitStatus::RemoveListener(hwnd);
+        UnregisterSortView(t->folder);
         RemoveWindowSubclass(hwnd, SubclassProc, id);
         Destroy(t);
     }
@@ -322,6 +332,7 @@ void AttachViewTint(IShellView* view) {
     t->settings = LoadSettings();
     view->QueryInterface(IID_PPV_ARGS(&t->folderView));
     if (t->folderView) t->folderView->GetFolder(IID_PPV_ARGS(&t->folder));
+    RegisterSortView(t->folder, t->folderView);
 
     std::wstring path = FolderPath(t->folderView);
     if (t->settings.git && !path.empty()) {

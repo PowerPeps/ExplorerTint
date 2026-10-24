@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include <vector>
 
 struct Rgba {
     BYTE r = 0, g = 0, b = 0, a = 0;
@@ -18,6 +19,9 @@ struct Settings {
     StateStyle untracked;
     StateStyle ignored;
     std::wstring gitPath;
+    StateStyle system;
+    bool systemLast = true;
+    std::vector<std::wstring> hiddenNames;  // lowercase
 };
 
 Settings LoadSettings();

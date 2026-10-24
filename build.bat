@@ -23,7 +23,7 @@ rc /nologo /fo obj\ExplorerTint.res ExplorerTint.rc
 if errorlevel 1 ( echo [ERREUR] rc.exe & exit /b 1 )
 
 cl /nologo /LD /MT /EHsc /O2 /W3 /std:c++17 /utf-8 /DUNICODE /D_UNICODE /Foobj\ ^
-   src\Common.cpp src\Settings.cpp src\GitStatus.cpp src\ImportPatch.cpp src\ClassicList.cpp src\ViewTint.cpp src\Bho.cpp src\DllMain.cpp ^
+   src\Common.cpp src\Settings.cpp src\GitStatus.cpp src\ImportPatch.cpp src\ClassicList.cpp src\FolderHooks.cpp src\ViewTint.cpp src\Bho.cpp src\DllMain.cpp ^
    obj\ExplorerTint.res /FeExplorerTint.dll /link /DEF:ExplorerTint.def
 if errorlevel 1 ( echo [ERREUR] Compilation echouee & exit /b 1 )
 

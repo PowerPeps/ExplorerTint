@@ -27,6 +27,20 @@ static void ReadColor(HKEY k, const wchar_t* name, Rgba& c) {
     else Log(L"settings: invalid color %s = \"%s\"", name, s.c_str());
 }
 
+static std::vector<std::wstring> SplitNames(const std::wstring& list) {
+    std::vector<std::wstring> names;
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t end = list.find(L';', start);
+        if (end == std::wstring::npos) end = list.size();
+        std::wstring name = list.substr(start, end - start);
+        size_t a = name.find_first_not_of(L" \t"), b = name.find_last_not_of(L" \t");
+        if (a != std::wstring::npos) names.push_back(Lower(name.substr(a, b - a + 1)));
+        start = end + 1;
+    }
+    return names;
+}
+
 bool ParseColor(const std::wstring& s, Rgba& out) {
     out = Rgba();
     if (s.empty()) return true;
@@ -57,9 +71,14 @@ Settings LoadSettings() {
     ParseColor(L"#C5783D", s.untracked.text);
     ParseColor(L"#C5783D", s.ignored.text);
     ParseColor(L"#9B49301F", s.ignored.back);
+    ParseColor(L"#80808099", s.system.text);
+    std::wstring hidden = L".claude;.bin;.build;.git;.github;.ia;.idea";
 
     HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return s;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kKey, 0, KEY_READ, &k) != ERROR_SUCCESS) {
+        s.hiddenNames = SplitNames(hidden);
+        return s;
+    }
     DWORD d;
     if (ReadDword(k, L"ClassicList", d)) s.classicList = d != 0;
     if (ReadDword(k, L"Git", d)) s.git = d != 0;
@@ -70,6 +89,11 @@ Settings LoadSettings() {
     ReadColor(k, L"IgnoredText", s.ignored.text);
     ReadColor(k, L"IgnoredBack", s.ignored.back);
     ReadString(k, L"GitPath", s.gitPath);
+    ReadColor(k, L"SystemText", s.system.text);
+    ReadColor(k, L"SystemBack", s.system.back);
+    if (ReadDword(k, L"SystemLast", d)) s.systemLast = d != 0;
+    ReadString(k, L"HiddenNames", hidden);
     RegCloseKey(k);
+    s.hiddenNames = SplitNames(hidden);
     return s;
 }

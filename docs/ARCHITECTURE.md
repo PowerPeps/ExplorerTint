@@ -79,6 +79,9 @@ Clé `HKCU\Software\ExplorerTint` :
 | `UntrackedText` / `UntrackedBack` | SZ | `#C5783D` / vide | Couleurs « non suivi » |
 | `IgnoredText` / `IgnoredBack` | SZ | `#C5783D` / `#9B49301F` | Couleurs « ignoré » |
 | `GitPath` | SZ | vide | Chemin de `git.exe` (sinon recherche dans le `PATH`) |
+| `SystemText` / `SystemBack` | SZ | `#80808099` / vide | Couleurs des éléments système (phase 2) |
+| `SystemLast` | DWORD | 1 | Éléments système en fin de liste (phase 2) |
+| `HiddenNames` | SZ | `.claude;.bin;.build;.git;.github;.ia;.idea` | Noms affichés comme cachés (phase 2) |
 
 Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relecture à chaque navigation ; l'onglet du ruban (phase 4) écrira dans cette clé.
 
@@ -87,9 +90,11 @@ Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relectu
 ### Phase 2 — fichiers système (G2)
 
 - Élément discret = attributs `Hidden` **et** `System` à la fois. Couvre `$RECYCLE.BIN`, `Recovery`, `System Volume Information`, `desktop.ini` **[vérifié, D:\]** ; aucun élément de `D:\.tools` ni `D:\.projects` n'a ces deux attributs (sur 4 niveaux) **[vérifié]**.
-- Rendu : couleur de texte dédiée, réglable.
-- Fin de liste : interception de `CFSFolder::CompareIDs` (`windows.storage.dll`), résolue par symboles, comme le mod Windhawk de taille des dossiers ([source](https://raw.githubusercontent.com/ramensoftware/windhawk-mods/main/mods/explorer-details-better-file-sizes.wh.cpp)). **[déduit]** : le sens du tri est appliqué après `CompareIDs`, donc à compenser en tri décroissant.
-- Nécessite une bibliothèque d'interception de fonctions (MinHook) et le chargement des symboles Microsoft (`dbghelp` + serveur de symboles).
+- Rendu : couleur de texte dédiée, réglable (`SystemText`, défaut `#80808099`, gris semi-transparent lisible en clair comme en sombre).
+- Noms traités comme cachés : `.claude`, `.bin`, `.build`, `.git`, `.github`, `.ia`, `.idea` s'affichent comme des éléments cachés (icône estompée), qu'ils aient l'attribut `Hidden` ou non. Liste réglable (`HiddenNames`). L'attribut réel du fichier n'est jamais modifié.
+- Fin de liste : les éléments système passent après les autres, quel que soit le sens du tri.
+- Moyen : remplacement de `GetAttributesOf` (ajout de `SFGAO_HIDDEN | SFGAO_GHOSTED` pour les noms listés) et de `CompareIDs` dans la table virtuelle de `IShellFolder` de `CFSFolder` (`windows.storage.dll`). Cette table est commune à toutes les instances : ni symboles ni bibliothèque d'interception. **[déduit]** : DefView estompe l'icône d'après `SFGAO_GHOSTED` et inverse le résultat de `CompareIDs` en tri décroissant ; le sens est relu par `IFolderView2::GetSortColumns` pour compenser.
+- Limite : quand Explorer masque les fichiers cachés, les noms listés restent visibles (le filtrage se fait à l'énumération, sur l'attribut réel).
 
 ### Phase 3 — colonne `#` (G3)
 
