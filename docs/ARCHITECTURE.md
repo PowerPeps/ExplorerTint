@@ -98,10 +98,11 @@ Couleur vide = rendu normal. Formats acceptés : `#RRGGBB`, `#RRGGBBAA`. Relectu
 
 ### Phase 3 — colonne `#` (G3)
 
-- Propriété déclarée par un schéma `.propdesc` (`PSRegisterPropertySchema`, droits administrateur).
-- Valeurs fournies en interceptant `CFSFolder::GetDetailsEx` et `CFSFolder::MapColumnToSCID`, tri via `CFSFolder::CompareIDs` (mêmes cibles que le mod de taille des dossiers).
-- Colonne placée en tête avec `IColumnManager::SetColumns`, uniquement dans les dossiers qui ont un ordre défini **[déduit]**.
+- La liste classique de DefView est en mode `LVS_OWNERDATA` **[vérifié, style `56001348` lu sur une fenêtre ouverte]** : l'ordre des lignes est celui du modèle interne de DefView, et une colonne ajoutée directement au `SysListView32` ne pourrait pas être triée.
+- Explorer lit les valeurs des colonnes par `CDefCollection::Item_GetValue`, pas par `IShellFolder2::GetDetailsEx` **[vérifié]** ([mod Windhawk](https://raw.githubusercontent.com/ramensoftware/windhawk-mods/main/mods/explorer-details-better-file-sizes.wh.cpp)) ; fournir une vraie propriété demanderait des symboles.
+- Moyen retenu : une propriété système existante, numérique et vide pour les fichiers, sert de colonne hôte. Elle est ajoutée en tête avec `IColumnManager::SetColumns`, uniquement dans les dossiers qui ont un ordre défini. Son titre est remplacé par `#` (interception de `LVM_INSERTCOLUMN` / `LVM_SETCOLUMN`), ses valeurs par le rang (interception de `LVN_GETDISPINFO`), et son tri par l'ordre personnalisé (le `CompareIDs` déjà remplacé en phase 2, colonne reconnue par `MapColumnToSCID`). Ni symboles ni droits administrateur. **[déduit]** : DefView appelle `CompareIDs` avec l'index de cette colonne.
 - Stockage de l'ordre : à décider (`desktop.ini` du dossier ou configuration centrale).
+- Saisie de l'ordre : à décider.
 
 ### Phase 4 — onglet du ruban (G4)
 
