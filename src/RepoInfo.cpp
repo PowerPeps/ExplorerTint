@@ -14,7 +14,7 @@ const UINT64 kMaxIconBytes = 2 * 1024 * 1024;
 const UINT32 kOtherColor = 0x8B949E;
 const size_t kMaxLanguages = 6;
 const unsigned short kUncounted = 65535;
-const char kCacheHeader[] = "ExplorerTint repos 4\n";  // bumped when the statistics change
+const char kCacheHeader[] = "ExplorerTint repos 5\n";  // bumped when the statistics change
 
 struct Entry {
     std::wstring commit;
@@ -115,6 +115,23 @@ std::wstring HeadCommit(const std::wstring& repo) {
         pos = end + 1;
     }
     return L"";
+}
+
+const wchar_t kUnborn[] = L"unborn ";
+
+ULONGLONG LastWrite(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return 0;
+    return ((ULONGLONG)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
+}
+
+// The HEAD commit, else, on an unborn branch, "unborn <time>" from the last change of the root folder or the index.
+std::wstring StateKey(const std::wstring& repo) {
+    std::wstring commit = HeadCommit(repo);
+    if (!commit.empty()) return commit;
+    std::wstring root = repo.back() == L'\\' ? repo.substr(0, repo.size() - 1) : repo;
+    if (GetFileAttributesW((root + L"\\.git").c_str()) == INVALID_FILE_ATTRIBUTES) return L"";
+    return kUnborn + std::to_wstring(std::max(LastWrite(root), LastWrite(root + L"\\.git\\index")));
 }
 
 template <size_t N> int FindKey(const LinguistKey (&table)[N], const wchar_t* key) {
@@ -307,7 +324,7 @@ std::string Unquote(std::string s) {
 }
 
 // The project's icon: first one its own files declare (Windows resource script, Android manifest, web manifest,
-// installer script, web page, top of the README), else the best named image file.
+// installer script, plugin package, web page, top of the README), else the best named image file.
 class IconFinder {
 public:
     IconFinder(const std::wstring& repo, const std::vector<TreeFile>& files) : m_repo(repo), m_files(files) {
@@ -327,6 +344,7 @@ public:
             { [](const std::wstring& name, const std::wstring&) { return name == L"androidmanifest.xml"; }, &IconFinder::FromAndroid },
             { [](const std::wstring& name, const std::wstring&) { return name == L"manifest.json" || name == L"site.webmanifest" || name == L"manifest.webmanifest"; }, &IconFinder::FromWebManifest },
             { [](const std::wstring&, const std::wstring& ext) { return ext == L".iss" || ext == L".nsi"; }, &IconFinder::FromInstaller },
+            { [](const std::wstring& name, const std::wstring&) { return name == L"loupedeckpackage.yaml"; }, &IconFinder::FromLoupedeck },
             { [](const std::wstring& name, const std::wstring&) { return name == L"index.html"; }, &IconFinder::FromHtml },
             { [](const std::wstring& name, const std::wstring&) { return name == L"readme.md"; }, &IconFinder::FromReadme },
         };
@@ -477,6 +495,11 @@ private:
         return L"";
     }
 
+    // A Loupedeck / Logi Actions plugin package: the marketplace icon sits beside its metadata file.
+    std::wstring FromLoupedeck(const TreeFile& f) {
+        return Usable(DirOf(f.path) + L"Icon256x256.png");
+    }
+
     std::wstring FromHtml(const TreeFile& f) {
         static const std::regex link(R"(<link\b[^>]*>)", std::regex::icase);
         static const std::regex rel(R"re(\brel\s*=\s*["']([^"']*)["'])re", std::regex::icase);
@@ -559,10 +582,38 @@ int IconFinder::IconScore(const std::wstring& path, UINT64 size, const std::wstr
     return score;
 }
 
-RepoInfo Compute(const std::wstring& repo) {
+// The blobs of HEAD, else, on an unborn branch, the working files git would add (sizes read from the disk).
+bool ListFiles(const std::wstring& repo, bool unborn, std::vector<TreeFile>& out) {
+    std::string text;
+    if (!GitStatus::Run(repo, unborn ? L"ls-files -z --cached --others --exclude-standard" : L"ls-tree -r -z -l HEAD", text))
+        return false;
+    for (size_t pos = 0; pos < text.size();) {
+        size_t end = text.find('\0', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string rec = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (unborn) {
+            WIN32_FILE_ATTRIBUTE_DATA data;
+            std::wstring path = Widen(rec);
+            if (path.empty() || !GetFileAttributesExW(WorkFile(repo, path).c_str(), GetFileExInfoStandard, &data) ||
+                (data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+                continue;
+            out.push_back({ path, ((UINT64)data.nFileSizeHigh << 32) | data.nFileSizeLow });
+            continue;
+        }
+        // "<mode> <type> <object> <size>\t<path>"
+        size_t tab = rec.find('\t');
+        if (tab == std::string::npos || rec.compare(0, 6, "120000") == 0 || rec.find(" blob ") == std::string::npos) continue;
+        size_t sizeStart = rec.find_last_of(' ', tab);
+        out.push_back({ Widen(rec.substr(tab + 1)), _strtoui64(rec.c_str() + sizeStart + 1, nullptr, 10) });
+    }
+    return true;
+}
+
+RepoInfo Compute(const std::wstring& repo, bool unborn) {
     RepoInfo info;
-    std::string out;
-    if (!GitStatus::Run(repo, L"ls-tree -r -z -l HEAD", out)) return info;
+    std::vector<TreeFile> tree;
+    if (!ListFiles(repo, unborn, tree)) return info;
 
     struct Pending {
         std::vector<int> langs;
@@ -573,17 +624,9 @@ RepoInfo Compute(const std::wstring& repo) {
     const Patterns& excluded = Excluded();
     std::vector<TreeFile> files;
 
-    // "<mode> <type> <object> <size>\t<path>\0"
-    for (size_t pos = 0; pos < out.size();) {
-        size_t end = out.find('\0', pos);
-        if (end == std::string::npos) end = out.size();
-        std::string rec = out.substr(pos, end - pos);
-        pos = end + 1;
-        size_t tab = rec.find('\t');
-        if (tab == std::string::npos || rec.compare(0, 6, "120000") == 0 || rec.find(" blob ") == std::string::npos) continue;
-        size_t sizeStart = rec.find_last_of(' ', tab);
-        UINT64 size = _strtoui64(rec.c_str() + sizeStart + 1, nullptr, 10);
-        std::wstring path = Widen(rec.substr(tab + 1));
+    for (auto& t : tree) {
+        const std::wstring& path = t.path;
+        UINT64 size = t.size;
         size_t slash = path.find_last_of(L'/');
         std::wstring name = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
 
@@ -705,8 +748,8 @@ DWORD WINAPI Worker(void*) {
             ReleaseSRWLockExclusive(&s_lock);
 
             ULONGLONG start = GetTickCount64();
-            std::wstring commit = HeadCommit(repo);
-            RepoInfo info = commit.empty() ? RepoInfo() : Compute(repo);
+            std::wstring commit = StateKey(repo);
+            RepoInfo info = commit.empty() ? RepoInfo() : Compute(repo, commit.compare(0, wcslen(kUnborn), kUnborn) == 0);
             Log(L"languages: %s, %zu language(s), icon \"%s\", %llu ms", repo.c_str(), info.languages.size(),
                 info.icon.c_str(), GetTickCount64() - start);
             AcquireSRWLockExclusive(&s_lock);
@@ -746,7 +789,7 @@ bool GetRepoInfo(const std::wstring& repo, RepoInfo& out) {
     ReleaseSRWLockShared(&s_lock);
     if (fresh) return true;
 
-    bool current = known && HeadCommit(repo) == commit;
+    bool current = known && StateKey(repo) == commit;
     AcquireSRWLockExclusive(&s_lock);
     if (current) {
         s_entries[key].checked = now;
